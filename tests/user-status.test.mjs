@@ -7,7 +7,7 @@ test(
   "Scenario 2: verify the first user's status is active or inactive",
   { timeout: 30_000 },
   async () => {
-    const listResult = await apiRequest("/users?page=1&per_page=1");
+    const listResult = await apiRequest("/users");
 
     assertHttpStatus(listResult, 200);
     assert.ok(Array.isArray(listResult.body), "The response body must be an array.");

@@ -14,7 +14,7 @@ Runnable API tests for the GoRest Users API, prepared by Zhafran Rifandi.
 
 ### Scenario 2 - Validate the first user's status
 
-- Sends `GET /users?page=1&per_page=1`.
+- Sends `GET /users` to retrieve the user list.
 - Verifies the response status is `200 OK`.
 - Verifies the response is a non-empty array.
 - Verifies the first entry's status is either `active` or `inactive`.
