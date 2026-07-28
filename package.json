@@ -1,0 +1,14 @@
+{
+  "name": "collabera-qa-engineer-api-assessment",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Runnable GoRest API tests for the Collabera QA Engineer technical assessment.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "test:public": "node --test tests/user-status.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
