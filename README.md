@@ -28,6 +28,8 @@ No npm packages are required. The project uses Node.js's built-in test runner an
 
 Reviewers who prefer Postman can also import the collection in `postman/`. Both runners cover the same two assessment scenarios.
 
+The latest sanitized execution evidence is available in [`TEST_RESULTS.md`](TEST_RESULTS.md).
+
 ## Run the full assessment
 
 Set the access token as an environment variable. Do not save a real token in the repository.
@@ -92,6 +94,7 @@ export GOREST_BASE_URL="https://gorest.co.in/public/v2"
 |-- .env.example
 |-- .gitignore
 |-- package.json
+|-- TEST_RESULTS.md
 `-- README.md
 ```
 
