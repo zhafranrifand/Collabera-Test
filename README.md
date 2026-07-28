@@ -26,6 +26,8 @@ Runnable API tests for the GoRest Users API, prepared by Zhafran Rifandi.
 
 No npm packages are required. The project uses Node.js's built-in test runner and `fetch` API.
 
+Reviewers who prefer Postman can also import the collection in `postman/`. Both runners cover the same two assessment scenarios.
+
 ## Run the full assessment
 
 Set the access token as an environment variable. Do not save a real token in the repository.
@@ -52,6 +54,15 @@ Scenario 1 is reported as skipped when `GOREST_TOKEN` is not set. Once the token
 npm run test:public
 ```
 
+## Run with Postman
+
+1. Import `postman/Zhafran_Rifandi_GoRest_Assessment.postman_collection.json` into Postman.
+2. Open the collection's **Variables** tab.
+3. Enter the GoRest token as the **current value** of `gorestToken`. Keep the initial value blank so the token is not exported or committed.
+4. Run the collection in its listed order.
+
+The collection generates a unique email for every run, validates both scenarios, and deletes the created test user at the end.
+
 ## Optional configuration
 
 The suite uses `https://gorest.co.in/public/v2` by default. Override it when needed:
@@ -76,6 +87,8 @@ export GOREST_BASE_URL="https://gorest.co.in/public/v2"
 |   |-- create-user.test.mjs
 |   |-- helpers.mjs
 |   `-- user-status.test.mjs
+|-- postman/
+|   `-- Zhafran_Rifandi_GoRest_Assessment.postman_collection.json
 |-- .env.example
 |-- .gitignore
 |-- package.json

@@ -1,0 +1,215 @@
+{
+  "info": {
+    "_postman_id": "24dcc691-62e7-42b8-937f-ae4b2f8f7cef",
+    "name": "Zhafran Rifandi - GoRest QA Assessment",
+    "description": "Postman implementation of the two GoRest API scenarios in the Collabera QA Engineer assessment. Run the requests in collection order so the created test user is removed by the final cleanup request.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "https://gorest.co.in/public/v2",
+      "type": "string"
+    },
+    {
+      "key": "gorestToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "createdUserId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "name",
+      "value": "Zhafran Rifandi QA Assessment",
+      "type": "string"
+    },
+    {
+      "key": "gender",
+      "value": "male",
+      "type": "string"
+    },
+    {
+      "key": "email",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "status",
+      "value": "active",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Scenario 1 - Create a new user and verify numeric ID",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const uniqueSuffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;",
+              "pm.collectionVariables.set('email', `zhafran.rifandi.qa.${uniqueSuffix}@example.com`);"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Response status is 201 Created', function () {",
+              "    pm.response.to.have.status(201);",
+              "});",
+              "",
+              "const createResponseBody = pm.response.json();",
+              "const requestBody = JSON.parse(pm.variables.replaceIn(pm.request.body.raw));",
+              "",
+              "pm.test('Returned ID is a numeric integer', function () {",
+              "    pm.expect(createResponseBody).to.have.property('id');",
+              "    pm.expect(createResponseBody.id).to.be.a('number');",
+              "    pm.expect(Number.isInteger(createResponseBody.id)).to.be.true;",
+              "});",
+              "",
+              "pm.test('Returned user matches the request body', function () {",
+              "    pm.expect(createResponseBody.name).to.equal(requestBody.name);",
+              "    pm.expect(createResponseBody.gender).to.equal(requestBody.gender);",
+              "    pm.expect(createResponseBody.email).to.equal(requestBody.email);",
+              "    pm.expect(createResponseBody.status).to.equal(requestBody.status);",
+              "});",
+              "",
+              "if (Number.isInteger(createResponseBody.id)) {",
+              "    pm.collectionVariables.set('createdUserId', String(createResponseBody.id));",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{gorestToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"{{name}}\",\n  \"gender\": \"{{gender}}\",\n  \"email\": \"{{email}}\",\n  \"status\": \"{{status}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/users",
+        "description": "Creates a user and validates the returned ID and user fields. Requires the gorestToken collection variable."
+      },
+      "response": []
+    },
+    {
+      "name": "Scenario 2 - Verify first user's status",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Response status is 200 OK', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "const listResponseBody = pm.response.json();",
+              "",
+              "pm.test('Response contains at least one user', function () {",
+              "    pm.expect(listResponseBody).to.be.an('array').that.is.not.empty;",
+              "});",
+              "",
+              "pm.test('First user status is active or inactive', function () {",
+              "    pm.expect(['active', 'inactive']).to.include(listResponseBody[0].status);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "auth": {
+          "type": "noauth"
+        },
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "url": "{{baseUrl}}/users?page=1&per_page=1",
+        "description": "Gets the first user and verifies that status is active or inactive."
+      },
+      "response": []
+    },
+    {
+      "name": "Cleanup - Delete the created test user",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Created test user is deleted', function () {",
+              "    pm.response.to.have.status(204);",
+              "});",
+              "",
+              "if (pm.response.code === 204) {",
+              "    pm.collectionVariables.unset('createdUserId');",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{gorestToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "DELETE",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "url": "{{baseUrl}}/users/{{createdUserId}}",
+        "description": "Deletes the user created by Scenario 1 so repeated test runs do not leave data behind."
+      },
+      "response": []
+    }
+  ]
+}
