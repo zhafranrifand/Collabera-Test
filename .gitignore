@@ -1,7 +1,0 @@
-.env
-.DS_Store
-node_modules/
-submission/
-test-results/
-tmp/
-*.log
