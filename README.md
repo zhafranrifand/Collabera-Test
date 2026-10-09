@@ -18,11 +18,11 @@ An offline-first Android expense tracker that turns transaction alerts into revi
 
 ## Run in Android Studio
 
-### Version 1.1.0 preview
+### Version 1.1.0
 
 The Home screen now offers **Import bank emails**, Settings scrolls on smaller screens, and the Gmail date range is shown first. The app displays its installed version on Home and in Settings.
 
-Debug builds install as **ExpenseMail Preview** (`com.expensemail.app.preview`) alongside the original app. This avoids deleting existing transactions when an older APK was signed with a different debug key. The preview has its own local data; it does not copy transactions from the original app. Register the preview package and its certificate fingerprint for Gmail OAuth when using this build. Before distributing future updates, configure a stable private signing key; fresh CI debug keys cannot update an installed build in place.
+Builds install as **ExpenseMail** (`com.expensemail.app`). If an older build uses a different signing key, uninstall it before installing this APK; this deletes its local transactions. The separate ExpenseMail Preview can also be uninstalled if it is no longer needed. Before distributing future updates, configure a stable private signing key; fresh CI debug keys cannot update an installed build in place.
 
 Open this folder in Android Studio with JDK 17 and Android SDK platform 35 installed. Let Gradle sync, then run the `app` configuration on a device or emulator. The Gradle wrapper configuration is included; Android Studio or Gradle downloads the required distribution on first sync.
 
