@@ -1,31 +1,25 @@
-# Collabera API Test
+# ExpenseMail — Android
 
-Postman collection for the GoRest Users API assessment, prepared by Zhafran Rifandi.
+An offline-first Android expense tracker that turns bank transaction alerts shared from Gmail into reviewable expenses. It does not request mailbox-wide access.
 
-## Test scenarios
+## Features
 
-1. Create a user with name, gender, email, and status. Verify that the returned ID is a numeric integer and that the response matches the request.
-2. Get the users list and verify that the first user's status is either `active` or `inactive`.
-3. Delete the created test user after validation.
+- Monthly spend dashboard and recent activity
+- Review, edit, confirm, and delete imported transactions
+- IDR totals and merchant-based category suggestions
+- Sender-domain hints for BCA, Livin’ by Mandiri, and Bank Jago
+- Parsing for the supplied BCA, Mandiri, and Jago transaction formats
+- Separate labeling for transfers
+- Local app-private storage
 
-## Project structure
+## Import a transaction
 
-```text
-.
-|-- postman_collection/
-|   `-- test/
-|       `-- Collabera.postman_collection.json
-`-- README.md
-```
+Open a bank alert in Gmail and choose Share → ExpenseMail. If Gmail does not offer the app, copy the alert text and paste it into ExpenseMail. Check the parsed amount, merchant, date, and type before confirming. Only text you explicitly share is parsed; the original email is not saved.
 
-## Run in Postman
+## Run on Android
 
-1. Clone or download this repository.
-2. Import `postman_collection/test/Collabera.postman_collection.json` into Postman.
-3. Open the collection's **Variables** tab.
-4. Enter a valid GoRest personal access token as the **current value** of `gorestToken`.
-5. Run the collection in its listed order.
+Open the project in Android Studio with JDK 17 and Android SDK 35, or use the Build ExpenseMail APK workflow under GitHub Actions. The workflow builds a debug APK artifact for personal testing.
 
-The collection generates a unique email for each run and removes the created test user during cleanup. The committed `gorestToken` value is blank; no access token is stored in this repository.
+## Privacy and parser notes
 
-GoRest access tokens can be created at <https://gorest.co.in/consumer/login>.
+Inbox scanning is not enabled. Bank templates vary, so parsing is best-effort. Sender domains are hints and cannot prove that an email is genuine. Review every imported transaction. Transfers are excluded from expense totals by default.
