@@ -2,7 +2,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <application
         android:allowBackup="false"
-        android:label="ExpenseMail"
+        android:label="${appLabel}"
         android:theme="@style/Theme.ExpenseMail"
         android:usesCleartextTraffic="false">
         <activity
