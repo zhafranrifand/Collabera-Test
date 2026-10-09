@@ -10,6 +10,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -326,7 +328,7 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
         ) { padding ->
             Column(Modifier.fillMaxSize().padding(padding).background(Canvas)) {
                 when (tab) {
-                    "Home" -> HomeScreen(expenses, onReview = { tab = "Review" })
+                    "Home" -> HomeScreen(expenses, onReview = { tab = "Review" }, onOpenGmail = { tab = "Settings" }, gmailConnected = gmailConnected)
                     "Review" -> ReviewScreen(
                         expenses = expenses,
                         importText = importText,
@@ -364,7 +366,7 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
 }
 
 @Composable
-private fun HomeScreen(expenses: List<Expense>, onReview: () -> Unit) {
+private fun HomeScreen(expenses: List<Expense>, onReview: () -> Unit, onOpenGmail: () -> Unit, gmailConnected: Boolean) {
     val approved = expenses.filter { it.approved }
     val currentMonthExpenses = approved.filter { isCurrentMonth(it.date) && it.recordType == "Expense" }
     val monthTotal = currentMonthExpenses.sumOf { it.amount }
@@ -372,8 +374,21 @@ private fun HomeScreen(expenses: List<Expense>, onReview: () -> Unit) {
     LazyColumn(contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Column { Text("EXPENSEMAIL", color = Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.4.sp); Text("Your money, in view.", color = White, fontSize = 16.sp) }
+                Column { Text("EXPENSEMAIL · v${BuildConfig.VERSION_NAME}", color = Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.4.sp); Text("Your money, in view.", color = White, fontSize = 16.sp) }
                 Box(Modifier.size(42.dp).background(Surface2, CircleShape), contentAlignment = Alignment.Center) { Icon(Icons.Default.AccountBalanceWallet, contentDescription = null, tint = Mint) }
+            }
+        }
+        item {
+            Column(Modifier.fillMaxWidth().background(Surface2, RoundedCornerShape(20.dp)).padding(18.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Inbox, null, tint = Mint)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Import bank emails", color = White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                }
+                Text("Choose a start and end date, then import BCA, Mandiri, and Jago alerts from Gmail.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.padding(top = 8.dp))
+                Button(onClick = onOpenGmail, modifier = Modifier.fillMaxWidth().padding(top = 12.dp), colors = ButtonDefaults.buttonColors(containerColor = Mint, contentColor = Ink), shape = RoundedCornerShape(14.dp)) {
+                    Text(if (gmailConnected) "Choose dates & sync Gmail" else "Set up Gmail import", fontWeight = FontWeight.Bold)
+                }
             }
         }
         item {
@@ -475,14 +490,9 @@ private fun SettingsScreen(
     onStartDateChange: (LocalDate) -> Unit,
     onEndDateChange: (LocalDate) -> Unit
 ) {
-    Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text("Settings", color = White, fontSize = 27.sp, fontWeight = FontWeight.Bold)
-        Column(Modifier.fillMaxWidth().background(Surface, RoundedCornerShape(18.dp)).padding(17.dp)) {
-            Text("Email import", color = White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            Text("This version imports an alert you share from Gmail. It does not sign in to or scan your mailbox.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.padding(top = 7.dp))
-            Text("Why this approach", color = Mint, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.padding(top = 13.dp))
-            Text("It avoids broad inbox access. Only the text you share is parsed, and saved transactions stay on this device.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.padding(top = 5.dp))
-        }
+        Text("ExpenseMail v${BuildConfig.VERSION_NAME} · Gmail import", color = Mint, fontSize = 12.sp)
         Column(Modifier.fillMaxWidth().background(Surface, RoundedCornerShape(18.dp)).padding(17.dp)) {
             Text("Gmail sync", color = White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
             Text("Choose the email date range to check. Matching BCA, Livin’ by Mandiri, and Bank Jago alerts are imported to Review; they never count until you confirm them.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.padding(top = 7.dp))
@@ -492,6 +502,7 @@ private fun SettingsScreen(
                 DateChoice("To", endDate, onEndDateChange, Modifier.weight(1f))
             }
             Text("Search period: ${startDate.format(DateTimeFormatter.ofPattern("d MMM yyyy"))} – ${endDate.format(DateTimeFormatter.ofPattern("d MMM yyyy"))}", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+            if (endDate.isBefore(startDate)) Text("Choose an end date on or after the start date.", color = Orange, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
             Button(
                 onClick = onSyncGmail,
                 enabled = !gmailSyncing && !endDate.isBefore(startDate),
@@ -502,6 +513,12 @@ private fun SettingsScreen(
             if (gmailConnected) TextButton(onClick = onDisconnectGmail) { Text("Disconnect Gmail", color = Orange) }
             if (gmailStatus.isNotBlank()) Text(gmailStatus, color = if (gmailStatus.contains("added") || gmailStatus.contains("No new")) Mint else Muted, fontSize = 12.sp, lineHeight = 17.sp)
             Text("Google will ask for read-only Gmail access. This app searches only the selected date range and supported bank sender domains. Matching email content is processed on this phone.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 8.dp))
+            Text("First-time setup: this app must be registered in Google Cloud before Gmail can connect. See the project's README for setup instructions.", color = Orange, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 8.dp))
+        }
+        Column(Modifier.fillMaxWidth().background(Surface, RoundedCornerShape(18.dp)).padding(17.dp)) {
+            Text("Paste an email alert", color = White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text("You can also paste a bank alert to import a single transaction. This option works without connecting Gmail.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.padding(top = 7.dp))
+            TextButton(onClick = onShareHelp) { Text("Open manual import", color = Mint) }
         }
         Text("Local-first · IDR · No analytics", color = Muted, fontSize = 12.sp)
     }
