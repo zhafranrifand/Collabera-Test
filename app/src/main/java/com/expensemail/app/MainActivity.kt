@@ -4,6 +4,9 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -21,6 +24,9 @@ import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,11 +37,21 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.json.JSONArray
 import org.json.JSONObject
+import com.google.android.gms.auth.api.identity.AuthorizationRequest
+import com.google.android.gms.auth.api.identity.Identity
+import com.google.android.gms.auth.api.identity.RevokeAccessRequest
+import com.google.android.gms.common.api.Scope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import java.time.LocalDate
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 
 private val Ink = Color(0xFF0C1728)
 private val Surface = Color(0xFF142238)
@@ -203,7 +219,98 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
     var senderText by remember { mutableStateOf("") }
     var error by remember { mutableStateOf("") }
     var editing by remember { mutableStateOf<Expense?>(null) }
+    var gmailConnected by remember { mutableStateOf(context.getSharedPreferences("expensemail", Context.MODE_PRIVATE).getBoolean("gmail_connected", false)) }
+    var gmailStatus by remember { mutableStateOf("") }
+    var gmailSyncing by remember { mutableStateOf(false) }
+    val prefs = remember { context.getSharedPreferences("expensemail", Context.MODE_PRIVATE) }
+    val defaultEndDate = remember { LocalDate.now() }
+    var gmailStartDate by remember {
+        mutableStateOf(runCatching { prefs.getString("gmail_start_date", null)?.let(LocalDate::parse) ?: defaultEndDate.minusDays(90) }.getOrDefault(defaultEndDate.minusDays(90)))
+    }
+    var gmailEndDate by remember {
+        mutableStateOf(runCatching { prefs.getString("gmail_end_date", null)?.let(LocalDate::parse) ?: defaultEndDate }.getOrDefault(defaultEndDate))
+    }
+    val activity = context as? ComponentActivity
+    val coroutineScope = rememberCoroutineScope()
+    val gmailScope = remember { listOf(Scope(GmailInboxReader.READ_ONLY_SCOPE)) }
     fun persist(updated: List<Expense>) { expenses = updated; saveExpenses(context, updated) }
+
+    fun syncWithToken(accessToken: String) {
+        coroutineScope.launch {
+            gmailSyncing = true
+            gmailStatus = "Checking recent bank alerts…"
+            try {
+                val (newExpenses, importedIds) = withContext(Dispatchers.IO) {
+                    val prefs = context.getSharedPreferences("expensemail", Context.MODE_PRIVATE)
+                    val knownIds = prefs.getStringSet("gmail_imported_ids", emptySet()).orEmpty().toSet()
+                    val emails = GmailInboxReader.recentBankAlerts(accessToken, knownIds, gmailStartDate, gmailEndDate)
+                    val parsed = emails.mapNotNull { email ->
+                        parseAlert(email.body, email.sender)?.copy(source = "Gmail · ${email.subject}", approved = false)
+                            ?.let { email.id to it }
+                    }
+                    parsed.map { it.second } to parsed.map { it.first }.toSet()
+                }
+                if (newExpenses.isNotEmpty()) persist(newExpenses + expenses)
+                if (importedIds.isNotEmpty()) {
+                    val prefs = context.getSharedPreferences("expensemail", Context.MODE_PRIVATE)
+                    val merged = (prefs.getStringSet("gmail_imported_ids", emptySet()).orEmpty() + importedIds).toSet()
+                    prefs.edit().putStringSet("gmail_imported_ids", merged).apply()
+                }
+                gmailConnected = true
+                context.getSharedPreferences("expensemail", Context.MODE_PRIVATE).edit().putBoolean("gmail_connected", true).apply()
+                val period = "${gmailStartDate.format(DateTimeFormatter.ofPattern("d MMM yyyy"))}–${gmailEndDate.format(DateTimeFormatter.ofPattern("d MMM yyyy"))}"
+                gmailStatus = if (newExpenses.isEmpty()) "No new matching bank alerts found for $period." else "${newExpenses.size} alert${if (newExpenses.size == 1) "" else "s"} added to review for $period."
+            } catch (e: Exception) {
+                gmailStatus = e.message ?: "Gmail sync failed. Try again."
+            } finally {
+                gmailSyncing = false
+            }
+        }
+    }
+
+    val gmailAuthorizationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK && result.data != null) {
+            runCatching { Identity.getAuthorizationClient(context).getAuthorizationResultFromIntent(result.data!!) }
+                .onSuccess { authorization ->
+                    val token = authorization.accessToken
+                    if (token.isNullOrBlank()) gmailStatus = "Google did not provide Gmail access. Please try again."
+                    else syncWithToken(token)
+                }
+                .onFailure { gmailStatus = it.message ?: "Gmail authorization failed." }
+        } else {
+            gmailStatus = "Gmail access was not granted."
+        }
+    }
+
+    fun requestGmailSync() {
+        if (activity == null) { gmailStatus = "Gmail authorization is unavailable in this screen."; return }
+        gmailStatus = "Requesting Gmail access…"
+        val request = AuthorizationRequest.builder().setRequestedScopes(gmailScope).build()
+        Identity.getAuthorizationClient(activity).authorize(request)
+            .addOnSuccessListener { authorization ->
+                if (authorization.hasResolution()) {
+                    val pendingIntent = authorization.pendingIntent
+                    if (pendingIntent == null) gmailStatus = "Google did not return an authorization prompt."
+                    else gmailAuthorizationLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                } else {
+                    val token = authorization.accessToken
+                    if (token.isNullOrBlank()) gmailStatus = "Google did not provide Gmail access. Please try again."
+                    else syncWithToken(token)
+                }
+            }
+            .addOnFailureListener { gmailStatus = it.message ?: "Gmail authorization failed." }
+    }
+
+    fun disconnectGmail() {
+        Identity.getAuthorizationClient(context).revokeAccess(
+            RevokeAccessRequest.builder().setScopes(gmailScope).build()
+        ).addOnCompleteListener {
+            gmailConnected = false
+            context.getSharedPreferences("expensemail", Context.MODE_PRIVATE).edit()
+                .remove("gmail_connected").remove("gmail_imported_ids").apply()
+            gmailStatus = "Gmail disconnected. Previously imported transactions remain on this device."
+        }
+    }
 
     MaterialTheme(colorScheme = darkColorScheme(primary = Mint, background = Canvas, surface = Surface, onSurface = White)) {
         Scaffold(
@@ -237,7 +344,18 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
                         onEdit = { editing = it }
                     )
                     "Activity" -> ActivityScreen(expenses.filter { it.approved })
-                    else -> SettingsScreen(onShareHelp = { tab = "Review" })
+                    else -> SettingsScreen(
+                        onShareHelp = { tab = "Review" },
+                        onSyncGmail = { requestGmailSync() },
+                        onDisconnectGmail = { disconnectGmail() },
+                        gmailConnected = gmailConnected,
+                        gmailSyncing = gmailSyncing,
+                        gmailStatus = gmailStatus,
+                        startDate = gmailStartDate,
+                        endDate = gmailEndDate,
+                        onStartDateChange = { gmailStartDate = it; prefs.edit().putString("gmail_start_date", it.toString()).apply() },
+                        onEndDateChange = { gmailEndDate = it; prefs.edit().putString("gmail_end_date", it.toString()).apply() }
+                    )
                 }
             }
         }
@@ -345,7 +463,18 @@ private fun ExpenseRow(expense: Expense) {
 }
 
 @Composable
-private fun SettingsScreen(onShareHelp: () -> Unit) {
+private fun SettingsScreen(
+    onShareHelp: () -> Unit,
+    onSyncGmail: () -> Unit,
+    onDisconnectGmail: () -> Unit,
+    gmailConnected: Boolean,
+    gmailSyncing: Boolean,
+    gmailStatus: String,
+    startDate: LocalDate,
+    endDate: LocalDate,
+    onStartDateChange: (LocalDate) -> Unit,
+    onEndDateChange: (LocalDate) -> Unit
+) {
     Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text("Settings", color = White, fontSize = 27.sp, fontWeight = FontWeight.Bold)
         Column(Modifier.fillMaxWidth().background(Surface, RoundedCornerShape(18.dp)).padding(17.dp)) {
@@ -356,9 +485,50 @@ private fun SettingsScreen(onShareHelp: () -> Unit) {
         }
         Column(Modifier.fillMaxWidth().background(Surface, RoundedCornerShape(18.dp)).padding(17.dp)) {
             Text("Gmail sync", color = White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            Text("Automatic inbox scanning can be added after registering a Google OAuth app and completing Google's review for restricted Gmail access.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.padding(top = 7.dp))
+            Text("Choose the email date range to check. Matching BCA, Livin’ by Mandiri, and Bank Jago alerts are imported to Review; they never count until you confirm them.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.padding(top = 7.dp))
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                DateChoice("From", startDate, onStartDateChange, Modifier.weight(1f))
+                DateChoice("To", endDate, onEndDateChange, Modifier.weight(1f))
+            }
+            Text("Search period: ${startDate.format(DateTimeFormatter.ofPattern("d MMM yyyy"))} – ${endDate.format(DateTimeFormatter.ofPattern("d MMM yyyy"))}", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+            Button(
+                onClick = onSyncGmail,
+                enabled = !gmailSyncing && !endDate.isBefore(startDate),
+                modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Mint, contentColor = Ink),
+                shape = RoundedCornerShape(14.dp)
+            ) { Text(if (gmailSyncing) "Checking Gmail…" else if (gmailConnected) "Sync Gmail" else "Connect Gmail & sync", fontWeight = FontWeight.Bold) }
+            if (gmailConnected) TextButton(onClick = onDisconnectGmail) { Text("Disconnect Gmail", color = Orange) }
+            if (gmailStatus.isNotBlank()) Text(gmailStatus, color = if (gmailStatus.contains("added") || gmailStatus.contains("No new")) Mint else Muted, fontSize = 12.sp, lineHeight = 17.sp)
+            Text("Google will ask for read-only Gmail access. This app searches only the selected date range and supported bank sender domains. Matching email content is processed on this phone.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 8.dp))
         }
         Text("Local-first · IDR · No analytics", color = Muted, fontSize = 12.sp)
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun DateChoice(label: String, date: LocalDate, onDateSelected: (LocalDate) -> Unit, modifier: Modifier = Modifier) {
+    var showPicker by remember { mutableStateOf(false) }
+    OutlinedButton(onClick = { showPicker = true }, modifier = modifier, shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = White)) {
+        Column {
+            Text(label, color = Muted, fontSize = 10.sp)
+            Text(date.format(DateTimeFormatter.ofPattern("d MMM yyyy")), color = White, fontSize = 12.sp)
+        }
+    }
+    if (showPicker) {
+        val pickerState = rememberDatePickerState(initialSelectedDateMillis = date.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli())
+        DatePickerDialog(
+            onDismissRequest = { showPicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    pickerState.selectedDateMillis?.let { millis -> onDateSelected(java.time.Instant.ofEpochMilli(millis).atZone(ZoneOffset.UTC).toLocalDate()) }
+                    showPicker = false
+                }) { Text("Choose") }
+            },
+            dismissButton = { TextButton(onClick = { showPicker = false }) { Text("Cancel") } }
+        ) { DatePicker(state = pickerState) }
     }
 }
 
