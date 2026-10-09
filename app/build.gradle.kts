@@ -16,12 +16,6 @@ android {
         versionName = "1.1.0"
         manifestPlaceholders["appLabel"] = "ExpenseMail"
     }
-    buildTypes {
-        getByName("debug") {
-            applicationIdSuffix = ".preview"
-            manifestPlaceholders["appLabel"] = "ExpenseMail Preview"
-        }
-    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
