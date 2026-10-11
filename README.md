@@ -14,6 +14,7 @@ An offline-first Android expense tracker that turns transaction alerts into revi
 - Manual Gmail sync with a selectable start/end date and supported bank sender filters
 - Local parsing; no email bodies or OAuth tokens are sent to an ExpenseMail server
 - Local persistence with app-private SharedPreferences
+- Empty states until real transactions are imported or confirmed
 
 ## Run in Android Studio
 
