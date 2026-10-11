@@ -1,4 +1,4 @@
-name: Build ExpenseMail APK
+name: Build ExpenseLog Android APK
 
 on:
   workflow_dispatch:
@@ -31,13 +31,64 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Prepare beta signing
+        if: ${{ vars.FIREBASE_BETA_ENABLED == 'true' }}
+        env:
+          BETA_KEYSTORE_BASE64: ${{ secrets.BETA_KEYSTORE_BASE64 }}
+          BETA_STORE_PASSWORD: ${{ secrets.BETA_STORE_PASSWORD }}
+          BETA_KEY_ALIAS: ${{ secrets.BETA_KEY_ALIAS }}
+          BETA_KEY_PASSWORD: ${{ secrets.BETA_KEY_PASSWORD }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          FIREBASE_APP_ID: ${{ vars.FIREBASE_APP_ID }}
+        run: |
+          for value in "$BETA_KEYSTORE_BASE64" "$BETA_STORE_PASSWORD" "$BETA_KEY_ALIAS" "$BETA_KEY_PASSWORD" "$FIREBASE_SERVICE_ACCOUNT_JSON" "$FIREBASE_APP_ID"; do
+            if [ -z "$value" ]; then
+              echo "Firebase beta configuration is incomplete. Check repository secrets and variables."
+              exit 1
+            fi
+          done
+          printf '%s' "$BETA_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/expense-log-beta.jks"
+          chmod 600 "$RUNNER_TEMP/expense-log-beta.jks"
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$RUNNER_TEMP/firebase-service-account.json"
+          chmod 600 "$RUNNER_TEMP/firebase-service-account.json"
+          echo "BETA_KEYSTORE_PATH=$RUNNER_TEMP/expense-log-beta.jks" >> "$GITHUB_ENV"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/firebase-service-account.json" >> "$GITHUB_ENV"
+          echo "CI_VERSION_CODE=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          echo "CI_VERSION_NAME=1.1.0-beta.$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+
       - name: Build debug APK
+        if: ${{ vars.FIREBASE_BETA_ENABLED != 'true' }}
         run: gradle --no-daemon :app:assembleDebug
+
+      - name: Build signed beta APK
+        if: ${{ vars.FIREBASE_BETA_ENABLED == 'true' }}
+        env:
+          BETA_STORE_PASSWORD: ${{ secrets.BETA_STORE_PASSWORD }}
+          BETA_KEY_ALIAS: ${{ secrets.BETA_KEY_ALIAS }}
+          BETA_KEY_PASSWORD: ${{ secrets.BETA_KEY_PASSWORD }}
+        run: gradle --no-daemon :app:assembleRelease
 
       - name: Publish APK for download
         uses: actions/upload-artifact@v7
         with:
-          name: ExpenseMail-debug.apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: ExpenseLog-Android.apk
+          path: ${{ vars.FIREBASE_BETA_ENABLED == 'true' && 'app/build/outputs/apk/release/app-release.apk' || 'app/build/outputs/apk/debug/app-debug.apk' }}
           archive: false
           retention-days: 7
+
+      - name: Set up Node.js for Firebase CLI
+        if: ${{ vars.FIREBASE_BETA_ENABLED == 'true' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Distribute beta to Firebase testers
+        if: ${{ vars.FIREBASE_BETA_ENABLED == 'true' }}
+        env:
+          FIREBASE_APP_ID: ${{ vars.FIREBASE_APP_ID }}
+        run: |
+          npm install --global firebase-tools
+          firebase appdistribution:distribute app/build/outputs/apk/release/app-release.apk \
+            --app "$FIREBASE_APP_ID" \
+            --groups "mvp-testers" \
+            --release-notes "Build $GITHUB_RUN_NUMBER (${GITHUB_SHA::7})"

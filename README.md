@@ -14,7 +14,6 @@ An offline-first Android expense tracker that turns transaction alerts into revi
 - Manual Gmail sync with a selectable start/end date and supported bank sender filters
 - Local parsing; no email bodies or OAuth tokens are sent to an ExpenseMail server
 - Local persistence with app-private SharedPreferences
-- Sample transactions so the app is useful immediately
 
 ## Run in Android Studio
 
@@ -22,7 +21,7 @@ An offline-first Android expense tracker that turns transaction alerts into revi
 
 The Home screen now offers **Import bank emails**, Settings scrolls on smaller screens, and the Gmail date range is shown first. The app displays its installed version on Home and in Settings.
 
-Builds install as **ExpenseMail** (`com.expensemail.app`). If an older build uses a different signing key, uninstall it before installing this APK; this deletes its local transactions. The separate ExpenseMail Preview can also be uninstalled if it is no longer needed. Before distributing future updates, configure a stable private signing key; fresh CI debug keys cannot update an installed build in place.
+Builds install as **ExpenseMail** (`com.expensemail.app`). Older builds may use a different signing key and cannot be updated in place. Check for locally saved transactions before replacing an installation, because uninstalling deletes them. The separate ExpenseMail Preview can also be uninstalled if it is no longer needed. Firebase beta builds use a stable private signing key for future updates.
 
 Open this folder in Android Studio with JDK 17 and Android SDK platform 35 installed. Let Gradle sync, then run the `app` configuration on a device or emulator. The Gradle wrapper configuration is included; Android Studio or Gradle downloads the required distribution on first sync.
 
@@ -34,7 +33,7 @@ Open a bank transaction alert in Gmail and choose **Share → ExpenseMail**. If 
 
 Gmail sync uses Google's `gmail.readonly` scope. The app's sync button searches only the selected date range and the supported bank sender domains, then parses email content on-device. Google consent for this scope applies to Gmail messages broadly, even though the app's query is limited. Email bodies and OAuth tokens are not uploaded to an ExpenseMail server. Imported message IDs are stored locally to prevent duplicates; disconnecting revokes Google's grant and clears that import history.
 
-Before sync can work, configure a Google Cloud project: enable the Gmail API, configure the OAuth consent screen with the `gmail.readonly` scope, add your Google account as a test user while the app is in Testing, and register an Android OAuth client for package `com.expensemail.app` using the SHA-1 signing certificate of the installed build. Public distribution needs Google's verification for the restricted scope. The GitHub Actions debug build must use a stable signing key if you register its fingerprint; do not publish private keystore files or credentials in the repository.
+Before sync can work, configure a Google Cloud project: enable the Gmail API, configure the OAuth consent screen with the `gmail.readonly` scope, add your Google account as a test user while the app is in Testing, and register an Android OAuth client for package `com.expensemail.app` using the SHA-1 signing certificate of the installed build. Public distribution needs Google's verification for the restricted scope. Register the Firebase beta signing certificate separately from any Android Studio debug certificate; do not publish private keystore files or credentials in the repository.
 
 If you prefer not to grant Gmail access, the Share flow remains available and only receives the specific message you share.
 
@@ -42,6 +41,10 @@ If you prefer not to grant Gmail access, the Share flow remains available and on
 
 Bank email templates vary. The MVP recognizes the labeled amount, date, and recipient patterns shown in the supplied BCA, Livin’ by Mandiri, and Jago examples. It handles Indonesian thousands/decimal separators and suggests a bank from the sender domain. A domain is only a hint, not proof that an email is genuine; review every imported transaction. If no transaction date is found, the import date is used. Transfer alerts are excluded from expense totals unless you change their type in Edit.
 
-## Build an APK from your phone with GitHub Actions
+## Beta builds through Firebase App Distribution
 
-The project includes a cloud build workflow. From a phone, upload the extracted project files to a GitHub repository (a private repository is fine), then open **Actions → Build ExpenseMail APK → Run workflow**. When the run finishes, download the `ExpenseMail-debug.apk` artifact from that run and open it on your phone to install. GitHub requires you to be signed in to download a private repository's artifact. The workflow produces a debug APK for personal testing, not a Play Store release.
+The GitHub Actions workflow builds on each push to `main` and can also be started manually. When the repository variable `FIREBASE_BETA_ENABLED` is `true`, it signs a release APK with a persistent beta key and uploads it to the Firebase App Distribution group `mvp-testers`. Testers receive an invitation and new-build notification from Firebase, then install from its tester page. The APK remains available as a GitHub Actions artifact.
+
+The Firebase path needs repository variable `FIREBASE_APP_ID` and Actions secrets `FIREBASE_SERVICE_ACCOUNT_JSON`, `BETA_KEYSTORE_BASE64`, `BETA_STORE_PASSWORD`, `BETA_KEY_ALIAS`, and `BETA_KEY_PASSWORD`. Use a dedicated service account with the Firebase App Distribution Admin role. Keep the original keystore and passwords backed up securely: changing the signing certificate prevents in-place updates. The workflow sets a fresh, increasing version code for each run.
+
+Until `FIREBASE_BETA_ENABLED` is set, the workflow continues to publish a debug APK artifact. A Firebase beta APK signed with the new key cannot update an existing APK signed with a different debug key. **Check and export any locally saved transactions before uninstalling an existing installation.** This app disables Android backup and currently has no in-app export, so uninstalling it deletes its local data. Create a second Android Gmail OAuth client for the beta key's SHA-1 before using Gmail sign-in on beta builds; retain the old client for existing installs.

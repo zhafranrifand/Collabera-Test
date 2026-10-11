@@ -8,13 +8,30 @@ android {
     namespace = "com.expensemail.app"
     compileSdk = 35
 
+    val betaKeystorePath = System.getenv("BETA_KEYSTORE_PATH")
+    val betaStorePassword = System.getenv("BETA_STORE_PASSWORD")
+    val betaKeyAlias = System.getenv("BETA_KEY_ALIAS")
+    val betaKeyPassword = System.getenv("BETA_KEY_PASSWORD")
+    val hasBetaSigning = listOf(betaKeystorePath, betaStorePassword, betaKeyAlias, betaKeyPassword).all { !it.isNullOrBlank() }
+
     defaultConfig {
         applicationId = "com.expensemail.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = System.getenv("CI_VERSION_CODE")?.toIntOrNull() ?: 2
+        versionName = System.getenv("CI_VERSION_NAME") ?: "1.1.0"
         manifestPlaceholders["appLabel"] = "ExpenseMail"
+    }
+    if (hasBetaSigning) {
+        signingConfigs {
+            create("beta") {
+                storeFile = file(betaKeystorePath!!)
+                storePassword = betaStorePassword
+                keyAlias = betaKeyAlias
+                keyPassword = betaKeyPassword
+            }
+        }
+        buildTypes.getByName("release").signingConfig = signingConfigs.getByName("beta")
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -25,6 +42,8 @@ android {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
     implementation(composeBom)
     androidTestImplementation(composeBom)
