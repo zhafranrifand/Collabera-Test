@@ -3,6 +3,7 @@ package com.expensemail.app
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import java.io.ByteArrayOutputStream
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
@@ -167,6 +168,9 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
     var skippedPreview by remember { mutableStateOf<BankEmail?>(null) }
     var skippedPreviewLoading by remember { mutableStateOf(false) }
     var skippedPreviewError by remember { mutableStateOf("") }
+    var backupMessage by remember { mutableStateOf("") }
+    var pendingBackup by remember { mutableStateOf<ExpenseBackup?>(null) }
+    var backupPreview by remember { mutableStateOf<BackupMergePreview?>(null) }
     var activityDateMode by remember { mutableStateOf("All") }
     var activityStartDate by remember { mutableStateOf(LocalDate.now().withDayOfMonth(1)) }
     var activityEndDate by remember { mutableStateOf(LocalDate.now()) }
@@ -183,6 +187,54 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
     }
     val activity = context as? ComponentActivity
     val coroutineScope = rememberCoroutineScope()
+    val backupExportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri != null) coroutineScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use {
+                        it.write(ExpenseBackupCodec.encode(expenses, syncStore.load().ledger))
+                    } ?: error("Could not open the selected file.")
+                }
+            }
+            backupMessage = result.fold({ "Backup saved. Keep this file somewhere safe." }, { "Could not save backup: ${it.message ?: "unknown error"}" })
+        }
+    }
+    val csvExportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
+        if (uri != null) coroutineScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(ExpenseCsvExporter.export(expenses)) }
+                        ?: error("Could not open the selected file.")
+                }
+            }
+            backupMessage = result.fold({ "CSV exported. CSV files cannot be restored as app data." }, { "Could not export CSV: ${it.message ?: "unknown error"}" })
+        }
+    }
+    val backupImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) coroutineScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    val raw = context.contentResolver.openInputStream(uri)?.use { input ->
+                        val output = ByteArrayOutputStream()
+                        val buffer = ByteArray(8 * 1024)
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            require(output.size() + count <= ExpenseBackupCodec.MAX_INPUT_BYTES) { "Backup file is too large to import." }
+                            output.write(buffer, 0, count)
+                        }
+                        String(output.toByteArray(), Charsets.UTF_8)
+                    } ?: error("Could not read the selected file.")
+                    ExpenseBackupCodec.decode(raw)
+                }
+            }
+            result.onSuccess { imported ->
+                pendingBackup = imported
+                backupPreview = ExpenseBackupCodec.merge(ExpenseBackup(expenses, syncStore.load().ledger), imported).preview
+                backupMessage = ""
+            }.onFailure { backupMessage = "Could not read backup: ${it.message ?: "invalid file"}" }
+        }
+    }
     val gmailScope = remember { listOf(Scope(GmailInboxReader.READ_ONLY_SCOPE)) }
     var requestedSyncMode by remember { mutableStateOf(GmailSyncRequestMode.NORMAL) }
     val scanProgressText = if (gmailSyncing) {
@@ -500,7 +552,12 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
                         startDate = gmailStartDate,
                         endDate = gmailEndDate,
                         onStartDateChange = { gmailStartDate = it; prefs.edit().putString("gmail_start_date", it.toString()).apply() },
-                        onEndDateChange = { gmailEndDate = it; prefs.edit().putString("gmail_end_date", it.toString()).apply() }
+                        onEndDateChange = { gmailEndDate = it; prefs.edit().putString("gmail_end_date", it.toString()).apply() },
+                        onExportBackup = { backupMessage = ""; backupExportLauncher.launch("pocketlog-backup.json") },
+                        onExportCsv = { backupMessage = ""; csvExportLauncher.launch("pocketlog-transactions.csv") },
+                        onImportBackup = { backupMessage = ""; backupImportLauncher.launch(arrayOf("application/json", "text/*")) },
+                        backupMessage = backupMessage,
+                        backupActionsEnabled = !gmailSyncing,
                     )
                 }
             }
@@ -509,6 +566,26 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
             if (!gmailSyncing) { persist(expenses.map { if (it.id == updated.id) updated else it }); editing = null }
             else gmailStatus = "Wait for Gmail sync to finish before changing transactions."
         }) }
+        val preview = backupPreview
+        val importedBackup = pendingBackup
+        if (preview != null && importedBackup != null) {
+            BackupMergeDialog(
+                preview = preview,
+                onDismiss = { backupPreview = null; pendingBackup = null },
+                onApply = {
+                    if (gmailSyncing) backupMessage = "Wait for Gmail sync to finish before restoring a backup."
+                    else runCatching {
+                        val merged = ExpenseBackupCodec.merge(ExpenseBackup(expenses, syncStore.load().ledger), importedBackup).backup
+                        syncStore.commit(SyncSnapshot(merged.transactions, merged.syncLedger))
+                        expenses = merged.transactions
+                        syncLedger = merged.syncLedger
+                        backupMessage = "Restore complete. Existing transactions and dismissals were preserved."
+                        backupPreview = null
+                        pendingBackup = null
+                    }.onFailure { backupMessage = "Could not restore backup: ${it.message ?: "unknown error"}" }
+                }
+            )
+        }
         selectedSkipped?.let { entry ->
             SkippedEmailDialog(
                 entry = entry,
@@ -612,7 +689,7 @@ private fun HomeScreen(
         item {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                    Text("ExpenseLog", color = White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                    Text("Pocketlog", color = White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                     Text("Your spending, pulled from your inbox.", color = Muted, fontSize = 12.sp)
                 }
                 IconButton(onClick = onOpenSettings, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.Settings, contentDescription = "Open Settings", tint = Muted, modifier = Modifier.size(20.dp)) }
@@ -1488,7 +1565,12 @@ private fun SettingsScreen(
     startDate: LocalDate,
     endDate: LocalDate,
     onStartDateChange: (LocalDate) -> Unit,
-    onEndDateChange: (LocalDate) -> Unit
+    onEndDateChange: (LocalDate) -> Unit,
+    onExportBackup: () -> Unit,
+    onExportCsv: () -> Unit,
+    onImportBackup: () -> Unit,
+    backupMessage: String,
+    backupActionsEnabled: Boolean,
 ) {
     var showScanDetails by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 22.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
@@ -1539,8 +1621,47 @@ private fun SettingsScreen(
                 Text("Paste an alert manually", fontWeight = FontWeight.SemiBold)
             }
         }
-        Text("ExpenseMail v${BuildConfig.VERSION_NAME}  ·  IDR  ·  Stored on this device", color = Muted, fontSize = 12.sp)
+        Column(Modifier.fillMaxWidth().background(Surface, RoundedCornerShape(18.dp)).padding(17.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Your data", color = White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            Text("Backups include transactions and Gmail scan history, but never message bodies or Google access tokens. Restore merges records and keeps this device’s existing data.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            OutlinedButton(onClick = onExportBackup, enabled = backupActionsEnabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Mint)) {
+                Text("Export restorable backup (JSON)", fontWeight = FontWeight.SemiBold)
+            }
+            OutlinedButton(onClick = onImportBackup, enabled = backupActionsEnabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Mint)) {
+                Text("Restore from backup", fontWeight = FontWeight.SemiBold)
+            }
+            OutlinedButton(onClick = onExportCsv, enabled = backupActionsEnabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Muted)) {
+                Text("Export transactions as CSV")
+            }
+            if (backupMessage.isNotBlank()) Text(backupMessage, color = if (backupMessage.startsWith("Could not")) Orange else Mint, fontSize = 12.sp, lineHeight = 17.sp)
+        }
+        Text("Pocketlog v${BuildConfig.VERSION_NAME}  ·  IDR  ·  Stored on this device", color = Muted, fontSize = 12.sp)
     }
+}
+
+@Composable
+private fun BackupMergeDialog(
+    preview: BackupMergePreview,
+    onDismiss: () -> Unit,
+    onApply: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Surface,
+        title = { Text("Restore backup?", color = White) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Review the merge before changing this device.", color = Muted)
+                Text("${preview.transactionsAdded} transactions will be added", color = White)
+                Text("${preview.duplicateTransactionIds + preview.duplicateGmailMessages} duplicates will be skipped", color = White)
+                Text("${preview.dismissedTransactionsSkipped} dismissed emails will stay dismissed", color = White)
+                Text("${preview.ledgerEntriesAdded} scan-history records and ${preview.cursorsAdded} saved scan cursors will be added", color = White)
+                Text("Existing device records and dismissals take priority. This cannot be undone.", color = Orange, fontSize = 12.sp)
+            }
+        },
+        confirmButton = { TextButton(onClick = onApply) { Text("Restore", color = Mint) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = Muted) } },
+    )
 }
 
 @Composable

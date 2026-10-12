@@ -1,9 +1,11 @@
-name: Build ExpenseLog Android APK
+name: Build Pocketlog Android APK
 
 on:
+  pull_request:
+    branches: [main]
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: ['**']
 
 permissions:
   contents: read
@@ -31,8 +33,23 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Set up Node.js for backup API checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run backup API tests and typecheck
+        working-directory: backup-api
+        run: |
+          npm ci
+          npm test
+          npm run typecheck
+
+      - name: Run Android unit tests and lint
+        run: gradle --no-daemon :app:testDebugUnitTest :app:lint
+
       - name: Prepare beta signing
-        if: ${{ vars.FIREBASE_BETA_ENABLED == 'true' }}
+        if: ${{ vars.FIREBASE_BETA_ENABLED == 'true' && github.ref == 'refs/heads/main' }}
         env:
           BETA_KEYSTORE_BASE64: ${{ secrets.BETA_KEYSTORE_BASE64 }}
           BETA_STORE_PASSWORD: ${{ secrets.BETA_STORE_PASSWORD }}
@@ -57,11 +74,11 @@ jobs:
           echo "CI_VERSION_NAME=1.1.0-beta.$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
 
       - name: Build debug APK
-        if: ${{ vars.FIREBASE_BETA_ENABLED != 'true' }}
+        if: ${{ vars.FIREBASE_BETA_ENABLED != 'true' || github.ref != 'refs/heads/main' }}
         run: gradle --no-daemon :app:assembleDebug
 
       - name: Build signed beta APK
-        if: ${{ vars.FIREBASE_BETA_ENABLED == 'true' }}
+        if: ${{ vars.FIREBASE_BETA_ENABLED == 'true' && github.ref == 'refs/heads/main' }}
         env:
           BETA_STORE_PASSWORD: ${{ secrets.BETA_STORE_PASSWORD }}
           BETA_KEY_ALIAS: ${{ secrets.BETA_KEY_ALIAS }}
@@ -71,19 +88,19 @@ jobs:
       - name: Publish APK for download
         uses: actions/upload-artifact@v7
         with:
-          name: ExpenseLog-Android.apk
-          path: ${{ vars.FIREBASE_BETA_ENABLED == 'true' && 'app/build/outputs/apk/release/app-release.apk' || 'app/build/outputs/apk/debug/app-debug.apk' }}
+          name: Pocketlog-Android.apk
+          path: ${{ vars.FIREBASE_BETA_ENABLED == 'true' && github.ref == 'refs/heads/main' && 'app/build/outputs/apk/release/app-release.apk' || 'app/build/outputs/apk/debug/app-debug.apk' }}
           archive: false
           retention-days: 7
 
       - name: Set up Node.js for Firebase CLI
-        if: ${{ vars.FIREBASE_BETA_ENABLED == 'true' }}
+        if: ${{ vars.FIREBASE_BETA_ENABLED == 'true' && github.ref == 'refs/heads/main' }}
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
       - name: Distribute beta to Firebase testers
-        if: ${{ vars.FIREBASE_BETA_ENABLED == 'true' }}
+        if: ${{ vars.FIREBASE_BETA_ENABLED == 'true' && github.ref == 'refs/heads/main' }}
         env:
           FIREBASE_APP_ID: ${{ vars.FIREBASE_APP_ID }}
         run: |

@@ -20,7 +20,7 @@ android {
         targetSdk = 35
         versionCode = System.getenv("CI_VERSION_CODE")?.toIntOrNull() ?: 2
         versionName = System.getenv("CI_VERSION_NAME") ?: "1.1.0"
-        manifestPlaceholders["appLabel"] = "ExpenseMail"
+        manifestPlaceholders["appLabel"] = "Pocketlog"
     }
     if (hasBetaSigning) {
         signingConfigs {
