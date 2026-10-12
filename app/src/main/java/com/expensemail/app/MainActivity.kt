@@ -1630,8 +1630,8 @@ private fun SettingsScreen(
             OutlinedButton(onClick = onImportBackup, enabled = backupActionsEnabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Mint)) {
                 Text("Restore from backup", fontWeight = FontWeight.SemiBold)
             }
-            OutlinedButton(onClick = onExportCsv, enabled = backupActionsEnabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Muted)) {
-                Text("Export transactions as CSV")
+            OutlinedButton(onClick = onExportCsv, enabled = backupActionsEnabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Mint)) {
+                Text("Export transactions as CSV", fontWeight = FontWeight.SemiBold)
             }
             if (backupMessage.isNotBlank()) Text(backupMessage, color = if (backupMessage.startsWith("Could not")) Orange else Mint, fontSize = 12.sp, lineHeight = 17.sp)
         }
