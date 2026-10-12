@@ -3,7 +3,9 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "tsx server.ts",
     "test": "tsx --test src/*.test.ts",
@@ -14,11 +16,11 @@
     "@hono/node-server": "^1.19.0",
     "hono": "^4.9.0",
     "jose": "^6.1.0",
+    "tsx": "^4.23.15",
     "zod": "^4.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.18.0",
-    "tsx": "^4.20.0",
     "typescript": "^5.9.0"
   }
 }
