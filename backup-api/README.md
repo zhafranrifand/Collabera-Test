@@ -5,11 +5,12 @@ Small Node 22 / Bun-compatible API for encrypted Pocketlog snapshots. It verifie
 ## Security and data flow
 
 - Every `/v1` endpoint requires a Firebase ID token with a valid Google signature, the configured Firebase project as issuer and audience, a verified email, and an exact match in `ALLOWED_EMAILS`.
-- Both allowed emails map to the same random `BACKUP_VAULT_ID`. The vault ID is not a user email or Firebase UID.
+- New snapshots are isolated by Firebase UID. The API hashes the UID before using it as an S3 object namespace, and derives the owner from the verified token rather than request data.
+- The existing shared `BACKUP_VAULT_ID` namespace is treated as a legacy vault and assigned exclusively to the UID configured by `BACKUP_LEGACY_OWNER_UID`. Other allowlisted UIDs cannot list, restore, overwrite, or delete it. Historical snapshots in that shared vault cannot be reliably split by account after the fact; assigning the legacy vault to one UID preserves access for that account while the other starts with a separate namespace.
 - The mobile client encrypts a versioned JSON backup before upload. The service stores the envelope as opaque data and does not persist email bodies, Gmail tokens, or plaintext transaction records.
 - On an authenticated restore, the service unwraps the 32-byte AES key with the RSA private key and returns it over TLS with the envelope. The phone performs AES-GCM decryption. This is encryption at rest with server-assisted restore, **not end-to-end encryption**: the service operator and anyone who obtains the configured RSA private key can unwrap a content key.
 - Use HTTPS only. API responses containing keys or snapshots have `Cache-Control: no-store`. The service intentionally emits no request or payload logs and returns generic internal errors.
-- Per-process rate limits are best-effort; run one API replica unless a shared rate-limit store is added. Requests are limited to 120 per forwarded client IP per minute and 120 per owner per minute; uploads are limited to 10 per owner per hour, and deletes to 10 per owner per minute. Request bodies are capped at 15 MiB; ciphertext at 14 MiB.
+- Per-process rate limits are best-effort; run one API replica unless a shared rate-limit store is added. Requests are limited to 120 per Railway `X-Real-IP` per minute and 120 per Firebase UID per minute; uploads are limited to 10 per UID per hour, and deletes to 10 per UID per minute. Request bodies are capped at 15 MiB; ciphertext at 14 MiB.
 - Retention keeps the newest snapshot for each of the seven newest UTC calendar dates and the newest snapshot from each of the next four distinct older ISO weeks. Other objects are deleted after successful upload. If listing or retention cleanup fails after the new object is durable, upload still returns success with `retentionPending: true`; a later upload retries cleanup. Keep S3 bucket versioning and provider lifecycle policies disabled unless their interaction with deletion is understood.
 
 ## Client envelope contract
@@ -43,7 +44,7 @@ Small Node 22 / Bun-compatible API for encrypted Pocketlog snapshots. It verifie
 | `POST /v1/backups` | Authenticated encrypted snapshot upload; returns `{id, uploadedAt, retentionPending}`. |
 | `GET /v1/backups?limit=50&cursor=...` | Authenticated descending list; limit is 1–100. Cursor is opaque and returned as `nextCursor`. |
 | `GET /v1/backups/{id}` | Authenticated restore envelope and base64 content key. |
-| `DELETE /v1/backups/{id}` | Authenticated deletion from the shared vault. |
+| `DELETE /v1/backups/{id}` | Authenticated deletion from the caller's assigned vault. |
 
 Errors use `{error, message}`. Snapshot IDs are server-generated UUIDs and object keys are stored beneath an opaque vault prefix. A client must not treat a successful upload as a successful device restore; it should authenticate/decrypt locally after download.
 
@@ -56,7 +57,8 @@ Set these as Railway service variables; never add values to this repository:
 | `PORT` | Optional HTTP listen port; defaults to 3000. |
 | `FIREBASE_PROJECT_ID` | Firebase Authentication project ID used for token issuer and audience validation. |
 | `ALLOWED_EMAILS` | Comma-separated exact email allowlist; configure only the two selected testers. |
-| `BACKUP_VAULT_ID` | Random 24–96 character URL-safe opaque identifier shared by those allowed accounts. |
+| `BACKUP_VAULT_ID` | Existing random opaque vault ID. Kept as the legacy object prefix to preserve existing snapshots. |
+| `BACKUP_LEGACY_OWNER_UID` | Firebase UID that retains access to the existing shared legacy vault. Required to prevent accidental loss of API access to old snapshots during rollout. Find and confirm the intended owner in Firebase Authentication before deploying. |
 | `BACKUP_ACTIVE_KEY_ID` | ID of the RSA public key currently returned to clients. |
 | `BACKUP_RSA_PRIVATE_KEYS_JSON` | Secret JSON object mapping key IDs to base64 PKCS#8 DER RSA private keys. Retain old entries while snapshots encrypted to them remain. |
 | `S3_ENDPOINT` | Private S3-compatible endpoint for the Railway bucket. |
@@ -65,6 +67,10 @@ Set these as Railway service variables; never add values to this repository:
 | `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | Bucket-scoped credentials with list, get, put, and delete access only to this bucket. |
 
 Generate a fresh RSA key outside the repository, for example with OpenSSL `genpkey` at 3072 bits. Convert the private key to PKCS#8 DER, base64-encode it, and put it into the Railway secret mapping. Never expose the private key through the API. To rotate, add a new key entry, change `BACKUP_ACTIVE_KEY_ID`, and retain prior private keys until all snapshots referencing those IDs expire or are deleted. Back up the key ring securely; losing an old private key makes its snapshots unrecoverable.
+
+### UID-isolation rollout
+
+Before deploying this version, set `BACKUP_LEGACY_OWNER_UID` to the Firebase UID of the account that should retain the existing shared snapshots. Do not guess this value. The legacy namespace is accessible only to that UID after rollout; other allowed accounts use a separate UID-derived prefix. Existing objects are not copied or deleted. If both accounts previously uploaded backups, the API cannot tell which account created each historical object, so choose the legacy owner deliberately and export/restore any records that must be moved before changing ownership. Keep the existing `BACKUP_VAULT_ID` and RSA key ring unchanged for this migration. After rollout, verify each account can list only its own vault before removing the legacy mapping in a later migration.
 
 The bucket service account should have access only to its designated bucket. Enable server-side encryption at the provider. This API does not manage IAM, provision Railway resources, or configure billing.
 

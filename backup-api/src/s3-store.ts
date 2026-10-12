@@ -6,36 +6,44 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { createHash } from 'node:crypto';
 import type { Envelope, SnapshotRecord, SnapshotStore } from './contracts.js';
 import { MAX_ENVELOPE_BYTES, MAX_SNAPSHOTS, envelopeSchema } from './contracts.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class S3SnapshotStore implements SnapshotStore {
-  private readonly prefix: string;
-  constructor(private readonly client: S3Client, private readonly bucket: string, vaultId: string) {
-    this.prefix = `${vaultId}/snapshots/`;
+  constructor(private readonly client: S3Client, private readonly bucket: string, private readonly legacyVaultId: string) {
   }
 
-  private key(id: string): string {
+  private prefix(ownerId: string): string {
+    if (ownerId === `legacy:${this.legacyVaultId}`) return `${this.legacyVaultId}/snapshots/`;
+    if (!ownerId.startsWith('user:')) throw new Error('Invalid backup owner');
+    const uid = ownerId.slice('user:'.length);
+    if (!/^[A-Za-z0-9:_-]{1,128}$/.test(uid)) throw new Error('Invalid backup owner');
+    const ownerHash = createHash('sha256').update(uid, 'utf8').digest('hex');
+    return `users/${ownerHash}/snapshots/`;
+  }
+
+  private key(ownerId: string, id: string): string {
     if (!UUID.test(id)) throw new Error('Invalid snapshot ID');
-    return `${this.prefix}${id}.json`;
+    return `${this.prefix(ownerId)}${id}.json`;
   }
 
-  async put(id: string, envelope: Envelope, uploadedAt: string): Promise<void> {
+  async put(ownerId: string, id: string, envelope: Envelope, uploadedAt: string): Promise<void> {
     const body = JSON.stringify({ envelope, uploadedAt });
     if (Buffer.byteLength(body) > MAX_ENVELOPE_BYTES) throw new Error('Envelope exceeds storage limit');
     await this.client.send(new PutObjectCommand({
       Bucket: this.bucket,
-      Key: this.key(id),
+      Key: this.key(ownerId, id),
       Body: body,
       ContentType: 'application/json',
     }));
   }
 
-  async get(id: string): Promise<{ envelope: Envelope; uploadedAt: string } | null> {
+  async get(ownerId: string, id: string): Promise<{ envelope: Envelope; uploadedAt: string } | null> {
     try {
-      const response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: this.key(id) }));
+      const response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: this.key(ownerId, id) }));
       if (!response.Body) return null;
       const raw = await response.Body.transformToString();
       if (Buffer.byteLength(raw) > MAX_ENVELOPE_BYTES) return null;
@@ -49,19 +57,20 @@ export class S3SnapshotStore implements SnapshotStore {
     }
   }
 
-  async list(): Promise<SnapshotRecord[]> {
+  async list(ownerId: string): Promise<SnapshotRecord[]> {
+    const prefix = this.prefix(ownerId);
     const records: SnapshotRecord[] = [];
     let continuationToken: string | undefined;
     do {
       const response = await this.client.send(new ListObjectsV2Command({
         Bucket: this.bucket,
-        Prefix: this.prefix,
+        Prefix: prefix,
         ContinuationToken: continuationToken,
         MaxKeys: 1000,
       }));
       for (const object of response.Contents ?? []) {
         if (!object.Key || !object.LastModified || object.Size === undefined) continue;
-        const name = object.Key.slice(this.prefix.length);
+        const name = object.Key.slice(prefix.length);
         if (!name.endsWith('.json')) continue;
         const id = name.slice(0, -5);
         if (!UUID.test(id)) continue;
@@ -73,15 +82,15 @@ export class S3SnapshotStore implements SnapshotStore {
     return records;
   }
 
-  async delete(id: string): Promise<void> {
-    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: this.key(id) }));
+  async delete(ownerId: string, id: string): Promise<void> {
+    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: this.key(ownerId, id) }));
   }
 
-  async deleteMany(ids: string[]): Promise<void> {
+  async deleteMany(ownerId: string, ids: string[]): Promise<void> {
     for (let offset = 0; offset < ids.length; offset += 1000) {
       const response = await this.client.send(new DeleteObjectsCommand({
         Bucket: this.bucket,
-        Delete: { Objects: ids.slice(offset, offset + 1000).map((id) => ({ Key: this.key(id) })), Quiet: true },
+        Delete: { Objects: ids.slice(offset, offset + 1000).map((id) => ({ Key: this.key(ownerId, id) })), Quiet: true },
       }));
       if (response.Errors?.length) throw new Error('Snapshot cleanup reported object deletion failures');
     }

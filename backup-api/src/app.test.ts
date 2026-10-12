@@ -8,8 +8,11 @@ import { snapshotsToDelete } from './retention.js';
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const KEY_ID = 'test-key-1';
 const TOKEN = 'valid-test-token';
+const SECOND_TOKEN = 'second-valid-test-token';
 const OWNER = 'opaque-vault-abcdefghijklmnopqrstuvwxyz';
+const SECOND_OWNER = 'user:firebase-user-2';
 const SNAPSHOT_ID = '6d18fd3a-10c5-4d09-9a9f-13c240c02d92';
+const SECOND_SNAPSHOT_ID = '9f0e90af-b146-46b2-ae09-7c05f0af5fa2';
 const NOW = new Date('2026-10-12T12:00:00.000Z');
 
 function envelope(keyId = KEY_ID): Envelope {
@@ -33,25 +36,33 @@ function envelope(keyId = KEY_ID): Envelope {
 }
 
 class MemoryStore implements SnapshotStore {
-  data = new Map<string, { envelope: Envelope; uploadedAt: string }>();
-  async put(id: string, value: Envelope, uploadedAt: string) { this.data.set(id, { envelope: value, uploadedAt }); }
-  async get(id: string) { return this.data.get(id) ?? null; }
-  async list(): Promise<SnapshotRecord[]> {
-    return [...this.data.entries()].map(([id, value]) => ({
-      id,
+  data = new Map<string, { ownerId: string; id: string; envelope: Envelope; uploadedAt: string }>();
+  private key(ownerId: string, id: string) { return `${ownerId}\u0000${id}`; }
+  async put(ownerId: string, id: string, value: Envelope, uploadedAt: string) { this.data.set(this.key(ownerId, id), { ownerId, id, envelope: value, uploadedAt }); }
+  async get(ownerId: string, id: string) {
+    const stored = this.data.get(this.key(ownerId, id));
+    return stored ? { envelope: stored.envelope, uploadedAt: stored.uploadedAt } : null;
+  }
+  async list(ownerId: string): Promise<SnapshotRecord[]> {
+    return [...this.data.values()].filter((value) => value.ownerId === ownerId).map((value) => ({
+      id: value.id,
       uploadedAt: value.uploadedAt,
       size: Buffer.byteLength(JSON.stringify(value)),
     }));
   }
-  async delete(id: string) { this.data.delete(id); }
-  async deleteMany(ids: string[]) { for (const id of ids) this.data.delete(id); }
+  async delete(ownerId: string, id: string) { this.data.delete(this.key(ownerId, id)); }
+  async deleteMany(ownerId: string, ids: string[]) { for (const id of ids) this.data.delete(this.key(ownerId, id)); }
 }
 
 function fixture() {
   const store = new MemoryStore();
   let issuedId = SNAPSHOT_ID;
   const app = createApp({
-    verifyToken: async (token) => token === TOKEN ? { uid: 'firebase-user', ownerId: OWNER } : null,
+    verifyToken: async (token) => {
+      if (token === TOKEN) return { uid: 'firebase-user', ownerId: OWNER };
+      if (token === SECOND_TOKEN) return { uid: 'firebase-user-2', ownerId: SECOND_OWNER };
+      return null;
+    },
     store,
     keyRing: new Map([[KEY_ID, privateKey]]),
     activeKeyId: KEY_ID,
@@ -70,6 +81,15 @@ const request = (path: string, init: RequestInit = {}, authenticated = true) => 
   },
 });
 
+const requestAs = (path: string, token: string, init: RequestInit = {}) => new Request(`http://localhost${path}`, {
+  ...init,
+  headers: {
+    ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
+    authorization: `Bearer ${token}`,
+    ...init.headers,
+  },
+});
+
 test('health is public and does not reveal environment configuration', async () => {
   const { app } = fixture();
   const response = await app.request('/health');
@@ -83,12 +103,12 @@ test('backup endpoints require a valid bearer token', async () => {
   assert.equal(response.status, 401);
 });
 
-test('rate limits unauthenticated requests by forwarded client IP', async () => {
+test('rate limits unauthenticated requests by Railway client IP', async () => {
   const { app } = fixture();
   let blocked: Response | undefined;
   for (let index = 0; index < 121; index += 1) {
     blocked = await app.request(new Request('http://localhost/v1/backup/key', {
-      headers: { 'x-forwarded-for': '198.51.100.12', authorization: 'Bearer invalid' },
+      headers: { 'x-real-ip': '198.51.100.12', authorization: 'Bearer invalid' },
     }));
     if (index < 120) assert.equal(blocked.status, 401);
   }
@@ -139,6 +159,32 @@ test('encrypted snapshot upload, list, authenticated restore, and delete work en
   assert.equal(store.data.size, 0);
 });
 
+test('Firebase owners cannot list, restore, or delete another owner’s snapshots', async () => {
+  const { app, store, useId } = fixture();
+  const firstUpload = await app.request(requestAs('/v1/backups', TOKEN, {
+    method: 'POST', body: JSON.stringify(envelope()),
+  }));
+  assert.equal(firstUpload.status, 201);
+
+  useId(SECOND_SNAPSHOT_ID);
+  const secondUpload = await app.request(requestAs('/v1/backups', SECOND_TOKEN, {
+    method: 'POST', body: JSON.stringify(envelope()),
+  }));
+  assert.equal(secondUpload.status, 201);
+  assert.equal(store.data.size, 2);
+
+  const firstList = await app.request(requestAs('/v1/backups', TOKEN));
+  const secondList = await app.request(requestAs('/v1/backups', SECOND_TOKEN));
+  assert.deepEqual((await firstList.json() as { snapshots: SnapshotRecord[] }).snapshots.map((item) => item.id), [SNAPSHOT_ID]);
+  assert.deepEqual((await secondList.json() as { snapshots: SnapshotRecord[] }).snapshots.map((item) => item.id), [SECOND_SNAPSHOT_ID]);
+
+  const crossAccountRestore = await app.request(requestAs(`/v1/backups/${SNAPSHOT_ID}`, SECOND_TOKEN));
+  assert.equal(crossAccountRestore.status, 404);
+  const crossAccountDelete = await app.request(requestAs(`/v1/backups/${SNAPSHOT_ID}`, SECOND_TOKEN, { method: 'DELETE' }));
+  assert.equal(crossAccountDelete.status, 404);
+  assert.equal(await store.get(OWNER, SNAPSHOT_ID) !== null, true);
+});
+
 test('rejects malformed envelopes, unknown RSA keys, future timestamps, and traversal IDs', async () => {
   const { app } = fixture();
   const malformed = await app.request(request('/v1/backups', { method: 'POST', body: '{"version":2}' }));
@@ -156,10 +202,10 @@ test('rejects malformed envelopes, unknown RSA keys, future timestamps, and trav
 test('validates list pagination bounds and opaque cursor', async () => {
   const { app, store, useId } = fixture();
   const first = envelope();
-  await store.put(SNAPSHOT_ID, first, '2026-10-12T11:00:00.000Z');
+  await store.put(OWNER, SNAPSHOT_ID, first, '2026-10-12T11:00:00.000Z');
   const secondId = '6d18fd3a-10c5-4d09-9a9f-13c240c02d93';
   useId(secondId);
-  await store.put(secondId, first, '2026-10-12T10:00:00.000Z');
+  await store.put(OWNER, secondId, first, '2026-10-12T10:00:00.000Z');
   const firstPage = await app.request('/v1/backups?limit=1', { headers: { authorization: `Bearer ${TOKEN}` } });
   const firstBody = await firstPage.json() as { snapshots: SnapshotRecord[]; nextCursor: string };
   assert.equal(firstBody.snapshots.length, 1);

@@ -10,7 +10,7 @@ internal class AndroidGmailSyncStore(context: Context) : GmailSyncStore {
     @Synchronized
     override fun load(): SyncSnapshot {
         val expenses = prefs.getString("expenses", null)?.let { decodeExpenses(it) }
-            ?.filterNot(Expense::isLegacyDemoRecord).orEmpty()
+            ?.let(::normalizeSavedExpenses).orEmpty()
         val ledger = migratedLedger(prefs)
         return SyncSnapshot(expenses, ledger)
     }

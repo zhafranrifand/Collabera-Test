@@ -40,6 +40,8 @@ Version **1.1.0** · Android (Kotlin, Jetpack Compose) · Min SDK 26 · Target S
 - Monthly spend card with a comparison against the same days of the previous month
 - Six-month trend, top merchants for the month, and recent activity
 - Activity history with All, This month, Custom, and Monthly views, shown 25 items per page
+- Five-tab navigation: Coverage, Activity, Home, Spending, and Plan, with Home centered
+- Spending category breakdowns, recurring-payment views, insights, and optional weekly or monthly targets
 
 **Keep your data safe**
 - Versioned JSON backup and restore with a merge preview
@@ -74,6 +76,8 @@ flowchart LR
 | Livin' by Mandiri | `noreply.livin@bankmandiri.co.id` |
 | Bank Jago | `noreply@jago.com` |
 | UOB | `noreply_UOB@uob.co.id` |
+| BNI | `wondr@bni.co.id` |
+| OCBC | `notifikasi@ocbc.id` |
 
 How parsing works:
 
@@ -83,18 +87,20 @@ How parsing works:
 - Most templates without a transaction date are skipped. One Jago card/fee format uses Gmail's received time as an estimated date.
 - A sender domain is only a hint, not proof an email is genuine. Review every imported transaction.
 
-Categories are suggested from the merchant name: Transport, Groceries, Food & drink, Shopping, Subscriptions, Transfer, or Other. You can change any category in Edit.
+Categories are suggested locally from merchant text, using built-in rules. Examples include Transport, Groceries, Food & drink, Shopping, Subscriptions, Transfer, and Other. New or ambiguous merchants default to Other; review and change a suggestion in Edit before confirming. The app does not use an AI service or automatically learn new merchant rules.
 
 ## Using the app
 
 | Screen | What you do there |
 | --- | --- |
-| **Home** | See this month's spend, trend, top merchants, and recent transactions. **Import bank emails** starts a Gmail scan. |
-| **Review** | Confirm, edit, or delete pending transactions. Paste alert text manually. Open the skipped-alert list. |
-| **Activity** | Browse confirmed transactions by date range and see totals (transfers excluded). |
-| **Settings** | Connect or disconnect Gmail, pick the scan date range, run or resume a scan, recheck skipped emails, and manage backups. |
+| **Coverage** | Inspect the review queue and skipped emails; review source evidence, recheck, add, or dismiss skipped messages. |
+| **Activity** | Browse confirmed transactions by date range, see monthly summaries, and view totals (transfers excluded). |
+| **Home** | The center tab shows this month's spend, trends, recent transactions, and shortcuts to review. |
+| **Spending** | Explore category breakdowns, recurring payments, and spending insights. |
+| **Plan** | Set optional weekly or monthly spending targets; targets do not block transactions. |
+| **Settings** | Connect or disconnect Gmail, pick the scan date range, run or resume a scan, and manage local or cloud backups. |
 
-**Typical flow:** open Settings or Home, choose a date range, scan Gmail, then confirm what lands in Review. The default range is the last 90 days.
+**Typical flow:** open Settings, choose a date range, scan Gmail, then confirm what lands in Coverage. The default range is the last 90 days.
 
 **Share flow:** open a bank alert in Gmail and choose **Share → Pocketlog**. If Gmail only offers a link, copy the alert text and paste it in Review. Only the text you share is parsed, and the original email is not saved. If the sender is missing, enter the sender address or domain in the optional field.
 
@@ -156,7 +162,7 @@ Never commit keystores, passwords, or service-account files. `.gitignore` alread
 
 ## Gmail sync in depth
 
-**What is searched.** The query combines your date range with the four supported sender addresses. Nothing else in your mailbox is requested.
+**What is searched.** The query combines your date range with supported bank sender addresses. Nothing else in your mailbox is requested.
 
 **How a scan runs.** Scans are bounded and resumable. Each batch lists up to 50 messages per page, walks at most 5 pages, and inspects at most 50 messages before saving progress. Every inspected message is committed to the ledger before the page cursor advances, so an interrupted scan loses nothing and picks up where it stopped.
 
@@ -220,17 +226,20 @@ Export a JSON backup before replacing an installation signed with a different ke
 
 ```
 app/src/main/java/com/expensemail/app/
-  MainActivity.kt           Entry point; handles the Share intent
-  ExpenseMailApp.kt         Top-level app state and flows
+  MainActivity.kt           Android entry point and Share intent handling
+  ExpenseMailApp.kt         Navigation and top-level app coordination
+  ExpenseViewModel.kt       Screen-facing state and app operations
+  ExpenseRepository.kt      Local data persistence and backup serialization
   Theme.kt                  Color tokens and shared constants
   Expense.kt                Transaction model
   Formatting.kt             Currency, date, and label helpers
   ExpenseStorage.kt         SharedPreferences load and save for transactions
   HomeScreen.kt             Dashboard
-  ReviewScreen.kt           Review queue and manual import
-  ActivityScreen.kt         Confirmed transactions and filters
-  SkippedScreens.kt         Skipped-alert list and detail dialog
-  SettingsScreen.kt         Gmail, backup, and cloud backup settings
+  CoverageScreen.kt         Review queue and skipped-email coverage
+  ActivityScreen.kt         Confirmed transactions and date filters
+  SpendingScreen.kt         Category and spending insights
+  PlanScreen.kt             Optional spending targets
+  SettingsScreen.kt         Gmail and backup settings
   Components.kt             Shared UI pieces
   Dialogs.kt                Edit and restore dialogs
   BankAlertParser.kt        Bank email parsing
@@ -265,7 +274,7 @@ A small TypeScript service (Node 22, Hono) that stores encrypted snapshots in a 
 | `GET /v1/backups/{id}` | Fetch a snapshot and its content key for restore |
 | `DELETE /v1/backups/{id}` | Delete a snapshot |
 
-Every `/v1` request requires a verified Firebase ID token from an allow-listed email. Requests are rate limited, bodies are capped at 15 MiB, responses use `no-store`, and the service does not log requests or payloads. Full details, environment variables, key rotation, and the envelope contract are in [`backup-api/README.md`](backup-api/README.md).
+Every `/v1` request requires a verified Firebase ID token from an allow-listed email. Snapshot storage is scoped to the authenticated Firebase UID, while a configured legacy owner mapping retains access to historical snapshots. Requests are rate limited, bodies are capped at 15 MiB, responses use `no-store`, and the service does not log requests or payloads. The UID-scoping change in this branch takes effect in the deployed service only after that API revision is deployed. Full details, environment variables, key rotation, and the envelope contract are in [`backup-api/README.md`](backup-api/README.md).
 
 ## Development, testing, and CI
 
@@ -314,7 +323,7 @@ Tests use in-memory storage and generated keys. They never contact Firebase, S3,
 
 - Data lives in a single JSON string in SharedPreferences, with dates stored as display strings. A database migration is planned.
 - Amounts are Indonesian rupiah only.
-- Cloud backup is limited to allow-listed tester accounts that share one vault, it is not end-to-end encrypted, and restore uses the latest snapshot only.
+- Cloud backup is limited to allow-listed tester accounts, is not end-to-end encrypted, and restore uses the latest snapshot only. UID isolation requires the updated backup API revision to be deployed.
 - Bank email templates change. Unrecognized formats land in the skipped list instead of being guessed.
 - Public Gmail distribution requires Google's restricted-scope verification.
 

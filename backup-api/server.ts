@@ -15,12 +15,14 @@ const allowedEmails = new Set(required('ALLOWED_EMAILS').split(',').map((email) 
 if (allowedEmails.size === 0 || [...allowedEmails].some((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) throw new Error('ALLOWED_EMAILS must contain valid email addresses');
 const vaultId = required('BACKUP_VAULT_ID');
 if (!/^[A-Za-z0-9_-]{24,96}$/.test(vaultId)) throw new Error('BACKUP_VAULT_ID must be an opaque random string of 24–96 URL-safe characters');
+const legacyOwnerUid = required('BACKUP_LEGACY_OWNER_UID');
+if (!/^[A-Za-z0-9:_-]{1,128}$/.test(legacyOwnerUid)) throw new Error('BACKUP_LEGACY_OWNER_UID must be a valid Firebase UID');
 const activeKeyId = required('BACKUP_ACTIVE_KEY_ID');
 const keyRing = parseKeyRing(required('BACKUP_RSA_PRIVATE_KEYS_JSON'), activeKeyId);
 const bucket = required('S3_BUCKET');
 const store = new S3SnapshotStore(createS3Client(process.env), bucket, vaultId);
 const app = createApp({
-  verifyToken: firebaseTokenVerifier({ projectId, allowedEmails, vaultId }),
+  verifyToken: firebaseTokenVerifier({ projectId, allowedEmails, vaultId, legacyOwnerUid }),
   store,
   keyRing,
   activeKeyId,

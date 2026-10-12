@@ -78,7 +78,7 @@ object GmailInboxReader {
         val localZone = ZoneId.systemDefault()
         val startSeconds = startDate.atStartOfDay(localZone).toEpochSecond() - 1
         val endSeconds = endDate.plusDays(1).atStartOfDay(localZone).toEpochSecond()
-        val search = "after:$startSeconds before:$endSeconds {from:bca@bca.co.id from:noreply.livin@bankmandiri.co.id from:noreply@jago.com from:noreply_UOB@uob.co.id}"
+        val search = "after:$startSeconds before:$endSeconds {from:bca@bca.co.id from:noreply.livin@bankmandiri.co.id from:noreply@jago.com from:noreply_UOB@uob.co.id from:wondr@bni.co.id from:notifikasi@ocbc.id}"
         val query = URLEncoder.encode(search, "UTF-8")
         val page = pageToken?.let { "&pageToken=${URLEncoder.encode(it, "UTF-8")}" }.orEmpty()
         val response = getJson("$BASE/messages?q=$query&maxResults=50$page", accessToken, cancellation)
