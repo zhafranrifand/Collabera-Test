@@ -5,6 +5,7 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 import java.util.Base64
 import java.time.LocalDate
 import java.time.ZoneId
@@ -40,6 +41,16 @@ internal class GmailApiException(
 object GmailInboxReader {
     const val READ_ONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
     private const val BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
+    private val activeConnections = ConcurrentHashMap<String, MutableSet<HttpURLConnection>>()
+
+    /** Aborts active Gmail HTTP requests for a user-cancelled background scan. */
+    fun cancelRequests(accessToken: String) {
+        val connections = activeConnections[accessToken] ?: return
+        val snapshot = synchronized(connections) { connections.toList() }
+        snapshot.forEach { connection ->
+            runCatching { connection.disconnect() }
+        }
+    }
 
     /** Lists one complete page. Callers can persist [GmailMessagePage.nextPageToken] after committing it. */
     fun listBankAlertPage(
@@ -116,6 +127,8 @@ object GmailInboxReader {
             setRequestProperty("Authorization", "Bearer $token")
             setRequestProperty("Accept", "application/json")
         }
+        val tokenConnections = activeConnections.computeIfAbsent(token) { mutableSetOf() }
+        synchronized(tokenConnections) { tokenConnections.add(connection) }
         try {
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
@@ -129,6 +142,10 @@ object GmailInboxReader {
             }
             return JSONObject(response)
         } finally {
+            synchronized(tokenConnections) {
+                tokenConnections.remove(connection)
+                if (tokenConnections.isEmpty()) activeConnections.remove(token, tokenConnections)
+            }
             connection.disconnect()
         }
     }

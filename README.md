@@ -34,7 +34,7 @@ Open a bank transaction alert in Gmail and choose **Share → Pocketlog**. If Gm
 
 ## Gmail access and setup
 
-Gmail sync uses Google's `gmail.readonly` scope. The app's sync button searches only the selected date range and the supported bank sender domains, then parses email content on-device. Long scans continue while you use another app; the ongoing notification shows status and lets you cancel. Android may still stop work after a force-stop, shutdown, or system time limit; completed batches are saved so you can resume when you return. Android 13 and newer require notification permission for the background scan. Google consent for this scope applies to Gmail messages broadly, even though the app's query is limited. Email bodies and OAuth tokens are not uploaded to a Pocketlog server. Imported message IDs are stored locally to prevent duplicates; disconnecting revokes Google's grant and clears that import history.
+Gmail sync uses Google's `gmail.readonly` scope. The app's sync button searches only the selected date range and the supported bank sender domains, then parses email content on-device. Long scans continue while you use another app; the ongoing notification shows status and lets you cancel. Android may still stop work after a force-stop, shutdown, or system time limit; completed batches are saved so you can resume when you return. Android 13 and newer may hide the foreground-service notice from the notification drawer if notification permission is denied; Android still allows the user-started scan to continue. Google consent for this scope applies to Gmail messages broadly, even though the app's query is limited. Email bodies and OAuth tokens are not uploaded to a Pocketlog server. Imported message IDs are stored locally to prevent duplicates; disconnecting revokes Google's grant but retains local scan history and imported transactions.
 
 In Settings, **Export restorable backup (JSON)** saves transactions and Gmail scan history. **Restore from backup** previews the merge first; it skips duplicates, preserves current-device records and dismissal choices, and does not resurrect dismissed alerts. **Export transactions as CSV** is for spreadsheets and does not contain the full scan history, so it cannot be used to restore the app.
 
@@ -46,7 +46,7 @@ If you prefer not to grant Gmail access, the Share flow remains available and on
 
 ## Parser limits
 
-Bank email templates vary. The MVP recognizes the labeled amount, date, and recipient patterns implemented for BCA, Livin’ by Mandiri, Jago, and UOB. It handles Indonesian thousands/decimal separators and suggests a bank from the sender domain. A domain is only a hint, not proof that an email is genuine; review every imported transaction. If no transaction date is found, the import date is used. Transfer alerts are excluded from expense totals unless you change their type in Edit.
+Bank email templates vary. The MVP recognizes the labeled amount, date, and recipient patterns implemented for BCA, Livin’ by Mandiri, Jago, and UOB. It handles Indonesian thousands/decimal separators and suggests a bank from the sender domain. A domain is only a hint, not proof that an email is genuine; review every imported transaction. Most templates without a transaction date are skipped; one Jago card/fee format uses Gmail's received time as an estimated transaction date. Transfer alerts are excluded from expense totals unless you change their type in Edit.
 
 ## Beta builds through Firebase App Distribution
 

@@ -13,6 +13,7 @@ internal interface GmailSyncGateway {
         pageToken: String?
     ): GmailMessagePage
     fun getBankEmail(accessToken: String, id: String): BankEmail
+    fun cancelRequests(accessToken: String) = Unit
 }
 
 internal object GmailReaderGateway : GmailSyncGateway {
@@ -20,6 +21,7 @@ internal object GmailReaderGateway : GmailSyncGateway {
     override fun listBankAlertPage(accessToken: String, startDate: LocalDate, endDate: LocalDate, pageToken: String?) =
         GmailInboxReader.listBankAlertPage(accessToken, startDate, endDate, pageToken)
     override fun getBankEmail(accessToken: String, id: String) = GmailInboxReader.getBankEmail(accessToken, id)
+    override fun cancelRequests(accessToken: String) = GmailInboxReader.cancelRequests(accessToken)
 }
 
 internal data class SyncSnapshot(val expenses: List<Expense>, val ledger: SyncLedger)

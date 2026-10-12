@@ -318,8 +318,10 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
     val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) beginGmailAuthorization()
         else {
-            gmailAuthorizing = false
-            gmailStatus = "Allow notifications to keep Gmail scanning while you use other apps."
+            // Android still allows a foreground service without drawer-notification permission.
+            // Let the user sync; the system may show its foreground notice only in Task Manager.
+            gmailStatus = "Notifications are off. Android may hide background sync progress."
+            beginGmailAuthorization()
         }
     }
 

@@ -15,7 +15,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
@@ -26,6 +28,7 @@ class GmailSyncForegroundService : Service() {
     private var syncJob: Job? = null
     private var revision = 0
     private var timeoutMessage: String? = null
+    @Volatile private var activeAccessToken: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -36,6 +39,10 @@ class GmailSyncForegroundService : Service() {
         when (intent?.action) {
             ACTION_CANCEL -> {
                 syncJob?.cancel(CancellationException("Gmail scan cancelled by the user."))
+                // Interrupt the current blocking request so cancellation does not wait for its
+                // connect/read timeout to expire.
+                GmailReaderGateway.cancelRequests(activeAccessToken.orEmpty())
+                if (syncJob?.isActive != true) stopSelf()
                 return START_NOT_STICKY
             }
             ACTION_START -> startScan(intent, startId)
@@ -60,9 +67,10 @@ class GmailSyncForegroundService : Service() {
         }
 
         publish(isRunning = true, message = statusFor(mode), targetTotal = if (targetMessageId != null) 1 else 0)
+        activeAccessToken = token
         startForeground(NOTIFICATION_ID, notification("Starting Gmail scan…", running = true))
         syncJob = serviceScope.launch {
-            runScan(token, startDate, endDate, mode, targetMessageId, startId)
+            runScan(token, startDate, endDate, mode, targetMessageId)
         }
     }
 
@@ -72,7 +80,6 @@ class GmailSyncForegroundService : Service() {
         endDate: LocalDate,
         mode: GmailSyncRequestMode,
         targetMessageId: String?,
-        startId: Int,
     ) {
         var fetched = 0
         var added = 0
@@ -96,7 +103,7 @@ class GmailSyncForegroundService : Service() {
 
             if (bulkRecheckIds != null && bulkRecheckIds.isEmpty()) {
                 finish("No skipped emails need rechecking.", fetched, added, batches, targetTotal, processed)
-                stopSelf(startId)
+                stopSelf()
                 return
             }
             if (bulkRecheckIds != null) {
@@ -113,8 +120,10 @@ class GmailSyncForegroundService : Service() {
                     else -> null
                 }
                 val report = withContext(Dispatchers.IO) {
+                    currentCoroutineContext().ensureActive()
                     engine.run(accessToken, startDate, endDate, nextMode, selectedIds)
                 }
+                currentCoroutineContext().ensureActive()
                 prefs.edit().putString("gmail_account_key", report.accountKey).putBoolean("gmail_connected", true).apply()
                 fetched += report.checked
                 added += report.added
@@ -143,7 +152,7 @@ class GmailSyncForegroundService : Service() {
                 if (report.error != null || (nextMode == GmailSyncRequestMode.RECHECK_SKIPPED && !moreBulk) ||
                     (nextMode != GmailSyncRequestMode.RECHECK_SKIPPED && !report.hasMore)) {
                     finish(message, fetched, added, batches, targetTotal, processed)
-                    stopSelf(startId)
+                    stopSelf()
                     return
                 }
                 if (nextMode != GmailSyncRequestMode.RECHECK_SKIPPED) nextMode = GmailSyncRequestMode.CONTINUE
@@ -165,8 +174,9 @@ class GmailSyncForegroundService : Service() {
             finish(status, fetched, added, batches, targetTotal, processed)
         } finally {
             syncJob = null
+            activeAccessToken = null
             stopForeground(STOP_FOREGROUND_DETACH)
-            stopSelf(startId)
+            stopSelf()
         }
     }
 
