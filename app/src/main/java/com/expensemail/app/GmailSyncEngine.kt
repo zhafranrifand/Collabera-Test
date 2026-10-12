@@ -5,23 +5,35 @@ import java.time.LocalDate
 import java.time.ZoneId
 
 internal interface GmailSyncGateway {
+    fun ensureNotCancelled(cancellation: GmailSyncCancellation?) { cancellation?.ensureActive() }
     fun getAccountEmail(accessToken: String): String
+    fun getAccountEmail(accessToken: String, cancellation: GmailSyncCancellation?) = getAccountEmail(accessToken)
     fun listBankAlertPage(
         accessToken: String,
         startDate: LocalDate,
         endDate: LocalDate,
         pageToken: String?
     ): GmailMessagePage
+    fun listBankAlertPage(
+        accessToken: String,
+        startDate: LocalDate,
+        endDate: LocalDate,
+        pageToken: String?,
+        cancellation: GmailSyncCancellation?,
+    ) = listBankAlertPage(accessToken, startDate, endDate, pageToken)
     fun getBankEmail(accessToken: String, id: String): BankEmail
-    fun cancelRequests(accessToken: String) = Unit
+    fun getBankEmail(accessToken: String, id: String, cancellation: GmailSyncCancellation?) = getBankEmail(accessToken, id)
 }
 
 internal object GmailReaderGateway : GmailSyncGateway {
     override fun getAccountEmail(accessToken: String) = GmailInboxReader.getAccountEmail(accessToken)
+    override fun getAccountEmail(accessToken: String, cancellation: GmailSyncCancellation?) = GmailInboxReader.getAccountEmail(accessToken, cancellation)
     override fun listBankAlertPage(accessToken: String, startDate: LocalDate, endDate: LocalDate, pageToken: String?) =
         GmailInboxReader.listBankAlertPage(accessToken, startDate, endDate, pageToken)
+    override fun listBankAlertPage(accessToken: String, startDate: LocalDate, endDate: LocalDate, pageToken: String?, cancellation: GmailSyncCancellation?) =
+        GmailInboxReader.listBankAlertPage(accessToken, startDate, endDate, pageToken, cancellation)
     override fun getBankEmail(accessToken: String, id: String) = GmailInboxReader.getBankEmail(accessToken, id)
-    override fun cancelRequests(accessToken: String) = GmailInboxReader.cancelRequests(accessToken)
+    override fun getBankEmail(accessToken: String, id: String, cancellation: GmailSyncCancellation?) = GmailInboxReader.getBankEmail(accessToken, id, cancellation)
 }
 
 internal data class SyncSnapshot(val expenses: List<Expense>, val ledger: SyncLedger)
@@ -55,7 +67,9 @@ internal class GmailSyncEngine(
         endDate: LocalDate,
         mode: GmailSyncRequestMode = GmailSyncRequestMode.NORMAL,
         targetMessageIds: Set<String>? = null,
+        cancellation: GmailSyncCancellation? = null,
     ): SyncReport {
+        gateway.ensureNotCancelled(cancellation)
         require(!endDate.isBefore(startDate)) { "End date must be on or after start date." }
         require(targetMessageIds == null || mode == GmailSyncRequestMode.RECHECK_SKIPPED) {
             "Messages can only be selected for a skipped-alert recheck."
@@ -209,8 +223,10 @@ internal class GmailSyncEngine(
                 .sortedWith(compareBy<SyncLedgerEntry> { it.checkedAtMillis }.thenBy { it.messageId })
             val selected = eligible.take(MAX_MESSAGE_GETS)
             for (entry in selected) {
-                val email = try { gateway.getBankEmail(accessToken, entry.messageId) }
+                gateway.ensureNotCancelled(cancellation)
+                val email = try { gateway.getBankEmail(accessToken, entry.messageId, cancellation) }
                 catch (e: Exception) {
+                    gateway.ensureNotCancelled(cancellation)
                     if (entry.accountKey == LEGACY_UNSCOPED_ACCOUNT && e is GmailApiException && e.statusCode == 404) {
                         // Legacy IDs had no mailbox identity. A 404 only rules out this mailbox.
                         commit(snapshot.copy(ledger = snapshot.ledger.withEntry(SyncLedgerEntry(
@@ -226,6 +242,7 @@ internal class GmailSyncEngine(
                 }
                 try { inspect(email, wasSkipped = true, legacyRecovery = entry.accountKey == LEGACY_UNSCOPED_ACCOUNT) }
                 catch (e: Exception) {
+                    gateway.ensureNotCancelled(cancellation)
                     if (e is GmailSyncStoreException) throw e
                     return report(friendlyError(e), true, null)
                 }
@@ -243,8 +260,10 @@ internal class GmailSyncEngine(
         var pages = 0
         var restartedInvalidCursor = false
         while (pages < MAX_LIST_PAGES && checked < MAX_MESSAGE_GETS) {
-            val page = try { gateway.listBankAlertPage(accessToken, startDate, endDate, pageToken) }
+            gateway.ensureNotCancelled(cancellation)
+            val page = try { gateway.listBankAlertPage(accessToken, startDate, endDate, pageToken, cancellation) }
             catch (e: Exception) {
+                gateway.ensureNotCancelled(cancellation)
                 if (!restartedInvalidCursor && pageToken != null && e is GmailApiException && e.statusCode == 400) {
                     // Gmail page tokens can expire as the mailbox changes. Restart at newest
                     // once; account-scoped ledger entries prevent duplicate imports.
@@ -267,15 +286,20 @@ internal class GmailSyncEngine(
             // Process whole pages only. This keeps the saved cursor at a page boundary.
             if (pending.size > MAX_MESSAGE_GETS - checked) return report(null, true, pageToken)
             for (id in ids) {
+                gateway.ensureNotCancelled(cancellation)
                 val known = snapshot.ledger.entryFor(account, id) != null ||
                     snapshot.ledger.entryForLegacy(id) != null || snapshot.expenses.any {
                         it.gmailMessageId == id && it.gmailAccountEmail?.let(::normalizedAccountKey) == account
                     }
                 if (known) { alreadySeen++; continue }
-                val email = try { gateway.getBankEmail(accessToken, id) }
-                catch (e: Exception) { return report(friendlyError(e), true, pageToken) }
+                val email = try { gateway.getBankEmail(accessToken, id, cancellation) }
+                catch (e: Exception) {
+                    gateway.ensureNotCancelled(cancellation)
+                    return report(friendlyError(e), true, pageToken)
+                }
                 try { inspect(email, wasSkipped = false) }
                 catch (e: Exception) {
+                    gateway.ensureNotCancelled(cancellation)
                     if (e is GmailSyncStoreException) throw e
                     return report(friendlyError(e), true, pageToken)
                 }

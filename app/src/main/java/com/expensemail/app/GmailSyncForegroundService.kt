@@ -13,6 +13,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
@@ -24,11 +25,15 @@ import java.time.LocalDate
 
 /** Keeps an explicitly user-started Gmail scan alive while Pocketlog is not visible. */
 class GmailSyncForegroundService : Service() {
+    private val scanLock = Any()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var syncJob: Job? = null
+    private var scanRunning = false
+    private var scanGeneration = 0
+    private var latestStartId = 0
     private var revision = 0
     private var timeoutMessage: String? = null
-    @Volatile private var activeAccessToken: String? = null
+    @Volatile private var activeCancellation: GmailSyncCancellation? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -36,41 +41,53 @@ class GmailSyncForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_CANCEL -> {
-                syncJob?.cancel(CancellationException("Gmail scan cancelled by the user."))
-                // Interrupt the current blocking request so cancellation does not wait for its
-                // connect/read timeout to expire.
-                GmailReaderGateway.cancelRequests(activeAccessToken.orEmpty())
-                if (syncJob?.isActive != true) stopSelf()
-                return START_NOT_STICKY
+        synchronized(scanLock) {
+            latestStartId = startId
+            when (intent?.action) {
+                ACTION_CANCEL -> {
+                    syncJob?.cancel(CancellationException("Gmail scan cancelled by the user."))
+                    // Interrupt the current blocking request so cancellation does not wait for its
+                    // connect/read timeout to expire.
+                    activeCancellation?.cancel()
+                    if (syncJob?.isActive != true) stopSelf(startId)
+                    return START_NOT_STICKY
+                }
+                ACTION_START -> startScan(intent, startId)
+                else -> stopSelf(startId)
             }
-            ACTION_START -> startScan(intent, startId)
-            else -> stopSelf(startId)
         }
         return START_NOT_STICKY
     }
 
     private fun startScan(intent: Intent, startId: Int) {
-        if (syncJob?.isActive == true) return
-        val token = intent.getStringExtra(EXTRA_ACCESS_TOKEN).orEmpty()
-        // Do not retain the short-lived OAuth token in the service's command Intent.
-        intent.removeExtra(EXTRA_ACCESS_TOKEN)
-        val startDate = intent.getStringExtra(EXTRA_START_DATE)?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
-        val endDate = intent.getStringExtra(EXTRA_END_DATE)?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
-        val mode = intent.getStringExtra(EXTRA_MODE)?.let { runCatching { GmailSyncRequestMode.valueOf(it) }.getOrNull() }
-        val targetMessageId = intent.getStringExtra(EXTRA_TARGET_MESSAGE_ID)
-        if (token.isBlank() || startDate == null || endDate == null || mode == null) {
-            GmailSyncRuntime.publish(GmailSyncUiState(message = "Could not start Gmail sync. Please try again."))
-            stopSelf(startId)
-            return
-        }
+        synchronized(scanLock) {
+            // Job.cancel() marks a coroutine inactive before its blocking engine call has unwound.
+            // Keep the previous run active until its finally block completes.
+            if (scanRunning) return@synchronized
+            val token = intent.getStringExtra(EXTRA_ACCESS_TOKEN).orEmpty()
+            // Do not retain the short-lived OAuth token in the service's command Intent.
+            intent.removeExtra(EXTRA_ACCESS_TOKEN)
+            val startDate = intent.getStringExtra(EXTRA_START_DATE)?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+            val endDate = intent.getStringExtra(EXTRA_END_DATE)?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+            val mode = intent.getStringExtra(EXTRA_MODE)?.let { runCatching { GmailSyncRequestMode.valueOf(it) }.getOrNull() }
+            val targetMessageId = intent.getStringExtra(EXTRA_TARGET_MESSAGE_ID)
+            if (token.isBlank() || startDate == null || endDate == null || mode == null) {
+                GmailSyncRuntime.publish(GmailSyncUiState(message = "Could not start Gmail sync. Please try again."))
+                stopSelf(startId)
+                return@synchronized
+            }
 
-        publish(isRunning = true, message = statusFor(mode), targetTotal = if (targetMessageId != null) 1 else 0)
-        activeAccessToken = token
-        startForeground(NOTIFICATION_ID, notification("Starting Gmail scan…", running = true))
-        syncJob = serviceScope.launch {
-            runScan(token, startDate, endDate, mode, targetMessageId)
+            publish(isRunning = true, message = statusFor(mode), targetTotal = if (targetMessageId != null) 1 else 0)
+            scanGeneration++
+            val generation = scanGeneration
+            timeoutMessage = null
+            scanRunning = true
+            val cancellation = GmailSyncCancellation()
+            activeCancellation = cancellation
+            startForeground(NOTIFICATION_ID, notification("Starting Gmail scan…", running = true))
+            syncJob = serviceScope.launch {
+                runScan(token, startDate, endDate, mode, targetMessageId, generation, cancellation)
+            }
         }
     }
 
@@ -80,6 +97,8 @@ class GmailSyncForegroundService : Service() {
         endDate: LocalDate,
         mode: GmailSyncRequestMode,
         targetMessageId: String?,
+        generation: Int,
+        cancellation: GmailSyncCancellation,
     ) {
         var fetched = 0
         var added = 0
@@ -91,7 +110,7 @@ class GmailSyncForegroundService : Service() {
             val store = AndroidGmailSyncStore(this)
             val engine = GmailSyncEngine(GmailReaderGateway, store)
             val bulkRecheckIds = if (mode == GmailSyncRequestMode.RECHECK_SKIPPED && targetMessageId == null) {
-                val account = withContext(Dispatchers.IO) { normalizedAccountKey(GmailReaderGateway.getAccountEmail(accessToken)) }
+                val account = withContext(Dispatchers.IO) { normalizedAccountKey(GmailReaderGateway.getAccountEmail(accessToken, cancellation)) }
                 val ledger = withContext(Dispatchers.IO) { store.load().ledger }
                 val scoped = ledger.skippedForRecheck(account, Int.MAX_VALUE)
                 val legacy = ledger.entries.filter {
@@ -103,7 +122,6 @@ class GmailSyncForegroundService : Service() {
 
             if (bulkRecheckIds != null && bulkRecheckIds.isEmpty()) {
                 finish("No skipped emails need rechecking.", fetched, added, batches, targetTotal, processed)
-                stopSelf()
                 return
             }
             if (bulkRecheckIds != null) {
@@ -121,7 +139,7 @@ class GmailSyncForegroundService : Service() {
                 }
                 val report = withContext(Dispatchers.IO) {
                     currentCoroutineContext().ensureActive()
-                    engine.run(accessToken, startDate, endDate, nextMode, selectedIds)
+                    engine.run(accessToken, startDate, endDate, nextMode, selectedIds, cancellation)
                 }
                 currentCoroutineContext().ensureActive()
                 prefs.edit().putString("gmail_account_key", report.accountKey).putBoolean("gmail_connected", true).apply()
@@ -152,7 +170,6 @@ class GmailSyncForegroundService : Service() {
                 if (report.error != null || (nextMode == GmailSyncRequestMode.RECHECK_SKIPPED && !moreBulk) ||
                     (nextMode != GmailSyncRequestMode.RECHECK_SKIPPED && !report.hasMore)) {
                     finish(message, fetched, added, batches, targetTotal, processed)
-                    stopSelf()
                     return
                 }
                 if (nextMode != GmailSyncRequestMode.RECHECK_SKIPPED) nextMode = GmailSyncRequestMode.CONTINUE
@@ -173,10 +190,17 @@ class GmailSyncForegroundService : Service() {
             }
             finish(status, fetched, added, batches, targetTotal, processed)
         } finally {
-            syncJob = null
-            activeAccessToken = null
-            stopForeground(STOP_FOREGROUND_DETACH)
-            stopSelf()
+            withContext(NonCancellable) {
+                synchronized(scanLock) {
+                    if (generation == scanGeneration) {
+                        syncJob = null
+                        scanRunning = false
+                        activeCancellation = null
+                        stopForeground(if (timeoutMessage == null) STOP_FOREGROUND_DETACH else STOP_FOREGROUND_REMOVE)
+                        stopSelf(latestStartId)
+                    }
+                }
+            }
         }
     }
 
@@ -247,6 +271,7 @@ class GmailSyncForegroundService : Service() {
     override fun onTimeout(startId: Int, fgsType: Int) {
         timeoutMessage = "Gmail scan paused by Android's background time limit. Your progress is saved."
         syncJob?.cancel(CancellationException(timeoutMessage!!))
+        activeCancellation?.cancel()
         val state = GmailSyncRuntime.state.value
         finish(timeoutMessage!!, state.fetched, state.added, state.batches, state.targetTotal, state.processed)
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -255,6 +280,7 @@ class GmailSyncForegroundService : Service() {
 
     override fun onDestroy() {
         syncJob?.cancel(CancellationException("Gmail sync service stopped."))
+        activeCancellation?.cancel()
         serviceScope.cancel()
         if (GmailSyncRuntime.state.value.isRunning) {
             GmailSyncRuntime.publish(GmailSyncRuntime.state.value.copy(

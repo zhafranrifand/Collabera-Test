@@ -2,6 +2,8 @@ package com.expensemail.app
 
 import android.text.Html
 import org.json.JSONObject
+import java.util.concurrent.CancellationException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -25,6 +27,28 @@ internal fun addHtmlTableBoundaries(html: String): String = html
     .replace(Regex("(?i)</(?:td|th)\\s*>")) { "${it.value} " }
     .replace(Regex("(?i)</tr\\s*>")) { "${it.value}<br/>" }
 
+/** Cancellation state and active HTTP requests owned by one sync run. */
+class GmailSyncCancellation {
+    private val cancelled = AtomicBoolean(false)
+    private val connections = ConcurrentHashMap.newKeySet<HttpURLConnection>()
+
+    fun cancel() {
+        cancelled.set(true)
+        connections.toList().forEach { runCatching { it.disconnect() } }
+    }
+
+    fun ensureActive() {
+        if (cancelled.get()) throw CancellationException("Gmail sync was cancelled.")
+    }
+
+    fun register(connection: HttpURLConnection) {
+        connections.add(connection)
+        ensureActive()
+    }
+
+    fun unregister(connection: HttpURLConnection) { connections.remove(connection) }
+}
+
 internal class GmailApiException(
     val statusCode: Int,
     val reason: String,
@@ -41,23 +65,14 @@ internal class GmailApiException(
 object GmailInboxReader {
     const val READ_ONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
     private const val BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
-    private val activeConnections = ConcurrentHashMap<String, MutableSet<HttpURLConnection>>()
-
-    /** Aborts active Gmail HTTP requests for a user-cancelled background scan. */
-    fun cancelRequests(accessToken: String) {
-        val connections = activeConnections[accessToken] ?: return
-        val snapshot = synchronized(connections) { connections.toList() }
-        snapshot.forEach { connection ->
-            runCatching { connection.disconnect() }
-        }
-    }
 
     /** Lists one complete page. Callers can persist [GmailMessagePage.nextPageToken] after committing it. */
     fun listBankAlertPage(
         accessToken: String,
         startDate: LocalDate,
         endDate: LocalDate,
-        pageToken: String? = null
+        pageToken: String? = null,
+        cancellation: GmailSyncCancellation? = null,
     ): GmailMessagePage {
         require(!endDate.isBefore(startDate)) { "End date must be on or after start date." }
         val localZone = ZoneId.systemDefault()
@@ -66,7 +81,7 @@ object GmailInboxReader {
         val search = "after:$startSeconds before:$endSeconds {from:bca@bca.co.id from:noreply.livin@bankmandiri.co.id from:noreply@jago.com from:noreply_UOB@uob.co.id}"
         val query = URLEncoder.encode(search, "UTF-8")
         val page = pageToken?.let { "&pageToken=${URLEncoder.encode(it, "UTF-8")}" }.orEmpty()
-        val response = getJson("$BASE/messages?q=$query&maxResults=50$page", accessToken)
+        val response = getJson("$BASE/messages?q=$query&maxResults=50$page", accessToken, cancellation)
         val messages = response.optJSONArray("messages")
         val ids = (0 until (messages?.length() ?: 0))
             .mapNotNull { messages?.optJSONObject(it)?.optString("id")?.takeIf(String::isNotBlank) }
@@ -75,9 +90,9 @@ object GmailInboxReader {
     }
 
     /** Fetches one message; an empty body is returned for missing or unsupported MIME content. */
-    fun getBankEmail(accessToken: String, id: String): BankEmail {
+    fun getBankEmail(accessToken: String, id: String, cancellation: GmailSyncCancellation? = null): BankEmail {
         require(id.isNotBlank()) { "Message ID must not be blank." }
-        val message = getJson("$BASE/messages/${URLEncoder.encode(id, "UTF-8")}?format=full", accessToken)
+        val message = getJson("$BASE/messages/${URLEncoder.encode(id, "UTF-8")}?format=full", accessToken, cancellation)
         val receivedAtMillis = message.optString("internalDate").toLongOrNull()
         val payload = message.optJSONObject("payload")
             ?: return BankEmail(id, "", "Bank transaction alert", "", receivedAtMillis)
@@ -95,31 +110,42 @@ object GmailInboxReader {
     }
 
     /** Returns the Gmail mailbox address associated with the current OAuth token. */
-    fun getAccountEmail(accessToken: String): String =
-        getJson("$BASE/profile", accessToken).optString("emailAddress")
+    fun getAccountEmail(accessToken: String, cancellation: GmailSyncCancellation? = null): String =
+        getJson("$BASE/profile", accessToken, cancellation).optString("emailAddress")
             .takeIf(String::isNotBlank)
             ?: throw IllegalStateException("Gmail account email was unavailable.")
 
-    private fun getJson(url: String, token: String): JSONObject {
+    private fun getJson(url: String, token: String, cancellation: GmailSyncCancellation? = null): JSONObject {
         var attempt = 0
         while (true) {
+            cancellation?.ensureActive()
             try {
-                return getJsonOnce(url, token)
+                return getJsonOnce(url, token, cancellation)
             } catch (e: GmailApiException) {
+                cancellation?.ensureActive()
                 if (!e.isQuotaLimit || attempt >= 3) throw e
                 val waitSeconds = e.retryAfterSeconds?.coerceIn(1, 30) ?: (1L shl attempt)
                 try {
-                    Thread.sleep(waitSeconds * 1000)
+                    var remainingMillis = waitSeconds * 1000
+                    while (remainingMillis > 0) {
+                        cancellation?.ensureActive()
+                        val pauseMillis = minOf(remainingMillis, 100L)
+                        Thread.sleep(pauseMillis)
+                        remainingMillis -= pauseMillis
+                    }
                 } catch (interrupted: InterruptedException) {
                     Thread.currentThread().interrupt()
+                    cancellation?.ensureActive()
                     throw e
                 }
+                cancellation?.ensureActive()
                 attempt++
             }
         }
     }
 
-    private fun getJsonOnce(url: String, token: String): JSONObject {
+    private fun getJsonOnce(url: String, token: String, cancellation: GmailSyncCancellation?): JSONObject {
+        cancellation?.ensureActive()
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 15_000
@@ -127,9 +153,9 @@ object GmailInboxReader {
             setRequestProperty("Authorization", "Bearer $token")
             setRequestProperty("Accept", "application/json")
         }
-        val tokenConnections = activeConnections.computeIfAbsent(token) { mutableSetOf() }
-        synchronized(tokenConnections) { tokenConnections.add(connection) }
         try {
+            cancellation?.register(connection)
+            cancellation?.ensureActive()
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
             val response = stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
@@ -142,10 +168,7 @@ object GmailInboxReader {
             }
             return JSONObject(response)
         } finally {
-            synchronized(tokenConnections) {
-                tokenConnections.remove(connection)
-                if (tokenConnections.isEmpty()) activeConnections.remove(token, tokenConnections)
-            }
+            cancellation?.unregister(connection)
             connection.disconnect()
         }
     }
