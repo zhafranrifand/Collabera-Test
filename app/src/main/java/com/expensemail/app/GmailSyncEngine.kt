@@ -58,7 +58,7 @@ internal class GmailSyncEngine(
     companion object {
         const val MAX_MESSAGE_GETS = 50
         const val MAX_LIST_PAGES = 5
-        const val PARSER_VERSION = 5
+        const val PARSER_VERSION = 7
     }
 
     fun run(

@@ -32,11 +32,11 @@ export type SnapshotRecord = {
 };
 
 export interface SnapshotStore {
-  put(id: string, envelope: Envelope, uploadedAt: string): Promise<void>;
-  get(id: string): Promise<{ envelope: Envelope; uploadedAt: string } | null>;
-  list(): Promise<SnapshotRecord[]>;
-  delete(id: string): Promise<void>;
-  deleteMany(ids: string[]): Promise<void>;
+  put(ownerId: string, id: string, envelope: Envelope, uploadedAt: string): Promise<void>;
+  get(ownerId: string, id: string): Promise<{ envelope: Envelope; uploadedAt: string } | null>;
+  list(ownerId: string): Promise<SnapshotRecord[]>;
+  delete(ownerId: string, id: string): Promise<void>;
+  deleteMany(ownerId: string, ids: string[]): Promise<void>;
 }
 
 export type Principal = { uid: string; ownerId: string };

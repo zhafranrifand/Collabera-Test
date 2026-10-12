@@ -40,6 +40,67 @@ class BankAlertParserTest {
     }
 
     @Test
+    fun parsesBcaMobileDataPurchaseAndCategorizesItAsUtilities() {
+        val result = BankAlertParser.parse(
+            """Status : Successful
+                |Transaction Date : 09 Oct 2026 17:51:58
+                |Transaction Type : Mobile Data - PAKET DATA AXIS
+                |Source of Fund : 2302****07
+                |Amount : IDR 17,000.00
+                |Admin Fee : IDR 1,500.00
+                |Total Payment : IDR 18,500.00
+                |Details: BRONET 2GB""".trimMargin(),
+            "bca@bca.co.id",
+        )
+
+        assertEquals("Mobile Data - PAKET DATA AXIS", result?.merchant)
+        assertEquals(18500L, result?.amount)
+        assertEquals("9 Oct 2026", result?.date)
+        assertEquals("Bills & utilities", result?.category)
+        assertEquals("Expense", result?.recordType)
+    }
+
+    @Test
+    fun categorizesObservedOctoberBcaQrisMerchants() {
+        val cases = listOf(
+            "SOZO SKIN CLINIC PONDOK B" to "Health & personal care",
+            "UDDERS ICE CREAM" to "Food & drink",
+            "MAGURO ORANGE GROVES PIK" to "Food & drink",
+            "PAP Photobooth" to "Entertainment",
+            "COSMONAUTS SPACEWEAR-HO" to "Shopping",
+            "Cummo Car Wash 7802" to "Transport",
+            "TUKU PAHLAWAN REVOLUSI" to "Food & drink",
+            "CAFE COCO MADE" to "Food & drink",
+            "SEBA IZAKAYA" to "Food & drink",
+            "IDM INDOMARET D" to "Groceries",
+            "OWL KOTA KASABLANKA" to "Food & drink",
+            "NANNYS PAVILLON CASA" to "Food & drink",
+            "ESB RESTAURANT TECHNOLOGY" to "Food & drink",
+            "Klinik Ban Bright Olimart" to "Transport",
+            "SPBU 31.13402,KALI MLNG" to "Transport",
+            "Sour Sally" to "Food & drink",
+            "JICAF 2026" to "Entertainment",
+            "LOKET" to "Entertainment",
+        )
+
+        cases.forEach { (merchant, category) ->
+            val result = BankAlertParser.parse(
+                """Status : Successful
+                    |Transaction Date : 11 Oct 2026 09:37:08
+                    |Transaction Type : QRIS Payment
+                    |Payment to : $merchant
+                    |Merchant Location : Jakarta, ID
+                    |Total Payment : IDR 63,120.00""".trimMargin(),
+                "bca@bca.co.id",
+            )
+
+            assertEquals("merchant=$merchant", merchant, result?.merchant)
+            assertEquals("merchant=$merchant", category, result?.category)
+            assertEquals("merchant=$merchant", "Expense", result?.recordType)
+        }
+    }
+
+    @Test
     fun parsesBcaVirtualAccountTopUpAsTransfer() {
         val result = BankAlertParser.parse(
             """Status : Successful
@@ -212,6 +273,14 @@ class BankAlertParserTest {
         assertEquals("No completed transaction found", BankAlertParser.skipReason(
             "Pengkinian Data Nasabah 2026", "noreply@jago.com",
         ))
+        assertEquals("No completed transaction found", BankAlertParser.skipReason(
+            "Tanggal Waktu Transaksi : 08:42PM 15-Jan-2025\nStatus Transaksi : Pembayaran QR | Berhasil",
+            "noreply_UOB@uob.co.id",
+        ))
+        assertEquals("Possible transaction needs review", BankAlertParser.skipReason(
+            "Tanggal Waktu Transaksi : 08:42PM 15-Jan-2025\nJumlah : IDR 3,999,000.00\nStatus Transaksi : Pembayaran QR | Berhasil",
+            "noreply_UOB@uob.co.id",
+        ))
     }
 
     @Test
@@ -259,10 +328,100 @@ class BankAlertParserTest {
             "noreply@jago.com",
         )
 
-        assertEquals("Transfer to TEST RECIPIENT Mandiri", result?.merchant)
+        assertEquals("Transfer to TEST RECIPIENT", result?.merchant)
         assertEquals(470000L, result?.amount)
         assertEquals("30 Sep 2026", result?.date)
         assertEquals("Transfer", result?.recordType)
+    }
+
+    @Test
+    fun labelsJagoRdnPocketWithdrawalWithoutInventingAReceiverName() {
+        val result = BankAlertParser.parse(
+            """Penarikan dana dari Kantong RDN berhasil dilakukan dengan rincian berikut:
+                |Ringkasan transaksi
+                |Dari: 118957371558
+                |Ke: 104796057039
+                |Jumlah: Rp190.331
+                |Tanggal Transaksi: 12 October 2026 08:17 WIB""".trimMargin(),
+            "noreply@jago.com",
+        )
+
+        assertEquals("RDN pocket withdrawal", result?.merchant)
+        assertEquals(190331L, result?.amount)
+        assertEquals("12 Oct 2026", result?.date)
+        assertEquals("Transfer", result?.recordType)
+        assertEquals("Transfer", result?.category)
+    }
+
+    @Test
+    fun masksDestinationAccountWhenJagoDoesNotProvideARecipientName() {
+        val result = BankAlertParser.parse(
+            """Transfer uang berhasil
+                |Ringkasan transaksi
+                |Dari: 118957371558
+                |Ke: 104796057039
+                |Jumlah: Rp190.331
+                |Tanggal Transaksi: 12 October 2026 08:17 WIB""".trimMargin(),
+            "noreply@jago.com",
+        )
+
+        assertEquals("Transfer to account", result?.merchant)
+    }
+
+    @Test
+    fun masksGroupedDestinationAccountAfterJagoRecipientName() {
+        val result = BankAlertParser.parse(
+            """Transfer uang berhasil
+                |Dari MA • 99887766
+                |Ke TEST RECIPIENT 1047 9605 7039
+                |Jumlah Rp470.000
+                |Tanggal transaksi 30 September 2026 21:20 WIB""".trimMargin(),
+            "noreply@jago.com",
+        )
+
+        assertEquals("Transfer to TEST RECIPIENT", result?.merchant)
+    }
+
+    @Test
+    fun keepsJagoRecipientNameAndRemovesBankAccountSuffix() {
+        val result = BankAlertParser.parse(
+            """Terima kasih sudah bertransaksi dengan Jago! Kamu baru saja melakukan transfer uang.
+                |Dari MA • 104796057039
+                |Ke ZHAFRAN RIFANDI Mandiri • 1660002202042
+                |Jumlah Rp190.000
+                |Tanggal transaksi 12 October 2026 08:33 WIB""".trimMargin(),
+            "noreply@jago.com",
+        )
+
+        assertEquals("Transfer to ZHAFRAN RIFANDI", result?.merchant)
+    }
+
+    @Test
+    fun rejectsFailedJagoTransfersEvenWhenReceiptHasAllTransferFields() {
+        val result = BankAlertParser.parse(
+            """Transfer gagal
+                |Dari MA • 99887766
+                |Ke TEST RECIPIENT
+                |Jumlah Rp470.000
+                |Tanggal transaksi 30 September 2026 21:20 WIB""".trimMargin(),
+            "noreply@jago.com",
+        )
+
+        assertNull(result)
+    }
+
+    @Test
+    fun rejectsPendingJagoTransfersAndAcceptsExplicitSuccessfulStatus() {
+        val fields = """Dari MA • 99887766
+            |Ke TEST RECIPIENT
+            |Jumlah Rp470.000
+            |Tanggal transaksi 30 September 2026 21:20 WIB""".trimMargin()
+
+        assertNull(BankAlertParser.parse("Transfer pending\n$fields", "noreply@jago.com"))
+        assertEquals(
+            "Transfer to TEST RECIPIENT",
+            BankAlertParser.parse("$fields\nStatus Transaksi: Berhasil", "noreply@jago.com")?.merchant,
+        )
     }
 
     @Test
@@ -282,6 +441,188 @@ class BankAlertParserTest {
     }
 
     @Test
+    fun parsesUobQrReceiptAndUsesMerchantName() {
+        val result = BankAlertParser.parse(
+            """Status Transaksi : Pembayaran QR | Berhasil
+                |Nama Bank Pemilik Aplikasi | Sumber Dana : Bank UOB | 7353809141
+                |Nama Bank Pemilik Merchant | Merchant PAN : Dana | 9360091501693705929
+                |Nama Merchant : saweria
+                |Customer PAN | Dana | 936000092007373538091412
+                |Terminal ID | Lokasi Terminal | saweria Kota Jakarta
+                |Tanggal Waktu Transaksi : 08:42PM 15-Jan-2025
+                |Nomor Resi : 501520745956
+                |Tipe Transaksi : Pembayaran QR
+                |Jumlah : IDR 3,999,000.00""".trimMargin(),
+            "noreply_UOB@uob.co.id",
+        )
+
+        assertEquals("saweria", result?.merchant)
+        assertEquals(3999000L, result?.amount)
+        assertEquals("15 Jan 2025", result?.date)
+        assertEquals("Other", result?.category)
+        assertEquals("Expense", result?.recordType)
+    }
+
+    @Test
+    fun parsesBniTransferEmailAsTransferAndMasksDestinationAccount() {
+        val result = BankAlertParser.parse(
+            """Transfer berhasil!
+                |Penerima
+                |Bpk ADE ROMANSAH
+                |BNI • 159416532
+                |Sumber dana
+                |ZHAFRAN RIFANDI
+                |Tanggal & waktu transaksi Tanggal 21-Feb-2026 Waktu 17:42:02 WIB
+                |Nominal transaksi Nominal Rp1.300.000
+                |Biaya admin Rp0
+                |Total Rp1.300.000
+                |Reference ID 20260221054159000518""".trimMargin(),
+            "wondr@bni.co.id",
+        )
+
+        assertEquals("Transfer to Bpk ADE ROMANSAH", result?.merchant)
+        assertEquals(1300000L, result?.amount)
+        assertEquals("21 Feb 2026", result?.date)
+        assertEquals("BNI", result?.bank)
+        assertEquals("Transfer", result?.recordType)
+    }
+
+    @Test
+    fun parsesBniWalletTopUpTotalAsExpense() {
+        val result = BankAlertParser.parse(
+            """Top-up berhasil!
+                |Penerima OVO-ZHAFRAN RIFANDI
+                |OVO • 62*******7296
+                |Sumber dana ZHAFRAN RIFANDI
+                |Tanggal & waktu top-up Tanggal 02 Juni 2026 Waktu 10:50:27 WIB
+                |Detail top-up
+                |Nominal Rp150.000
+                |Biaya transaksi Rp0
+                |Total Rp150.000
+                |Ref ID 20260602105023098629""".trimMargin(),
+            "wondr@bni.co.id",
+        )
+
+        assertEquals("OVO-ZHAFRAN RIFANDI", result?.merchant)
+        assertEquals(150000L, result?.amount)
+        assertEquals("2 Jun 2026", result?.date)
+        assertEquals("Expense", result?.recordType)
+    }
+
+    @Test
+    fun doesNotTreatBniCashWithdrawalCodeEmailAsCompletedTransaction() {
+        val result = BankAlertParser.parse(
+            """Kode tarik tunai siap digunakan!
+                |Tanggal & waktu transaksi 30 Mei 2026 17:24:34 WIB
+                |Nominal Rp150.000
+                |Penyedia layanan ATM BNI""".trimMargin(),
+            "wondr@bni.co.id",
+        )
+
+        assertNull(result)
+    }
+
+    @Test
+    fun parsesOcbcFundsTransferAndUsesTheTransferDateAndRecipient() {
+        val result = BankAlertParser.parse(
+            """Successful Funds Transfer To Other Bank
+                |We are pleased to inform you that the following funds transfer request has been successful.
+                |FROM
+                |ZHAFRAN RIFANDI
+                |AMOUNT IDR 17,425,000
+                |TO
+                |ZHAFRAN RIFANDI
+                |BANK BCA
+                |1234567890
+                |TRANSFER DATE:
+                |03 Sep 2026 14:26:40 WIB
+                |INSTRUCTION DATE:
+                |03 Sep 2026 14:26:38 WIB""".trimMargin(),
+            "notifikasi@ocbc.id",
+        )
+
+        assertEquals("Transfer to ZHAFRAN RIFANDI", result?.merchant)
+        assertEquals(17425000L, result?.amount)
+        assertEquals("3 Sep 2026", result?.date)
+        assertEquals("OCBC", result?.bank)
+        assertEquals("Transfer", result?.recordType)
+    }
+
+    @Test
+    fun parsesOcbcQrPaymentUsingMerchantAndDayFirstNumericDate() {
+        val result = BankAlertParser.parse(
+            """QR Payment Successful
+                |We inform you that the following QR Payment request has been successful.
+                |Merchant PAN
+                |936000123456789
+                |Tako
+                |TANGERANG, 12870
+                |Terminal No. A01
+                |Amount Pay IDR 3,999,000.00
+                |Payment Date:
+                |03/08/2026""".trimMargin(),
+            "notifikasi@ocbc.id",
+        )
+
+        assertEquals("Tako", result?.merchant)
+        assertEquals(3999000L, result?.amount)
+        assertEquals("3 Aug 2026", result?.date)
+        assertEquals("Expense", result?.recordType)
+
+        val impossibleDate = BankAlertParser.parse(
+            """QR Payment Successful
+                |The following QR Payment request has been successful.
+                |Merchant PAN 936000123456789
+                |Tako
+                |Amount Pay IDR 3,999,000.00
+                |Payment Date: 31/02/2026""".trimMargin(),
+            "notifikasi@ocbc.id",
+        )
+        assertNull(impossibleDate)
+    }
+
+    @Test
+    fun prefersExplicitOcbcQrMerchantOverBankAndSourceMetadata() {
+        val result = BankAlertParser.parse(
+            """QR Payment Successful
+                |The following QR Payment request has been successful.
+                |Merchant PAN
+                |936000123456789
+                |Nama Bank Pemilik Aplikasi | Sumber Dana : Bank OCBC | 1234567890
+                |Nama Bank Pemilik Merchant | BCA | 9876543210
+                |Nama Merchant : saweria
+                |Amount Pay IDR 3,999,000.00
+                |Payment Date: 03/08/2026""".trimMargin(),
+            "notifikasi@ocbc.id",
+        )
+
+        assertEquals("saweria", result?.merchant)
+        assertEquals(3999000L, result?.amount)
+        assertEquals("Expense", result?.recordType)
+    }
+
+    @Test
+    fun parsesOcbcBillPaymentAsExpenseAndIgnoresDeviceLoginNotices() {
+        val payment = BankAlertParser.parse(
+            """Successful Bill Payment
+                |The following request for bill payment has been successful.
+                |TO OVO
+                |PAYMENT AMOUNT IDR 15,000
+                |PAYMENT DATE:
+                |28 Apr 2026 19:18:47 WIB""".trimMargin(),
+            "notifikasi@ocbc.id",
+        )
+        val login = BankAlertParser.parse("Device Successfully Logged In to OCBC mobile", "notifikasi@ocbc.id")
+
+        assertEquals("OVO", payment?.merchant)
+        assertEquals(15000L, payment?.amount)
+        assertEquals("28 Apr 2026", payment?.date)
+        assertEquals("Expense", payment?.recordType)
+        assertNull(login)
+        assertNull(BankAlertParser.parse("Successful Funds Transfer to merchant", "untrusted@ocbc.id"))
+    }
+
+    @Test
     fun rejectsPromotionsAndCssCurrencyNoise() {
         assertNull(
             BankAlertParser.parse(
@@ -297,5 +638,36 @@ class BankAlertParserTest {
                 "bca@bca.co.id",
             ),
         )
+    }
+
+    @Test
+    fun rejectsFlattenedCssAndBankFooterButKeepsLegitimateCssMerchant() {
+        val malformed = listOf(
+            "1500888",
+            "BCA AccountSource of Fund: 2302xxxx07Source of Fund",
+            "background-color: #ffffff; text-align: center",
+        )
+        malformed.forEach { merchant ->
+            assertNull(
+                BankAlertParser.parse(
+                    """Status : Successful
+                        |Transaction Date : 11 Oct 2026 09:37:08
+                        |Transaction Type : QRIS Payment
+                        |Payment to : $merchant
+                        |Total Payment : IDR 63,120.00""".trimMargin(),
+                    "bca@bca.co.id",
+                ),
+            )
+        }
+
+        val legitimate = BankAlertParser.parse(
+            """Status : Successful
+                |Transaction Date : 11 Oct 2026 09:37:08
+                |Transaction Type : QRIS Payment
+                |Payment to : CSS Holdings
+                |Total Payment : IDR 63,120.00""".trimMargin(),
+            "bca@bca.co.id",
+        )
+        assertEquals("CSS Holdings", legitimate?.merchant)
     }
 }

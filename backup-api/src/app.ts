@@ -1,5 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 import type { Envelope, Principal, SnapshotRecord, SnapshotStore, TokenVerifier } from './contracts.js';
 import { MAX_ENVELOPE_BYTES, MAX_REQUEST_BYTES, MAX_SNAPSHOTS, envelopeSchema } from './contracts.js';
 import { type KeyRing, publicKeySpkiBase64, unwrapContentKey } from './crypto.js';
@@ -40,8 +41,10 @@ export function createApp(deps: AppDependencies) {
   app.onError((_error, c) => c.json({ error: 'internal_error', message: 'Request could not be completed.' }, 500));
   app.get('/health', (c) => c.json({ status: 'ok' }));
   app.use('/v1/*', async (c, next) => {
-    const forwarded = c.req.header('x-forwarded-for')?.split(',').map((part) => part.trim()).filter(Boolean);
-    const clientIp = forwarded?.at(-1)?.slice(0, 64) || 'unknown';
+    // Railway sets X-Real-IP at its edge. Do not trust a client-controlled
+    // X-Forwarded-For chain for the unauthenticated IP rate limit.
+    const realIp = c.req.header('x-real-ip')?.trim();
+    const clientIp = realIp && isIP(realIp) ? realIp : 'unknown';
     if (!limited(`ip:${clientIp}`, 120, 60_000)) return c.json({ error: 'rate_limited', message: 'Too many requests. Try again shortly.' }, 429);
     await next();
   });
@@ -56,14 +59,14 @@ export function createApp(deps: AppDependencies) {
   const authenticate = async (c: Context) => {
     const principal = await getPrincipal(c);
     if (!principal) return { response: c.json({ error: 'unauthorized', message: 'A valid authorized Firebase account is required.' }, 401) };
-    if (!limited(`owner:${principal.ownerId}:read`, 120, 60_000)) return { response: c.json({ error: 'rate_limited', message: 'Too many requests. Try again shortly.' }, 429) };
+    if (!limited(`owner:${principal.uid}:read`, 120, 60_000)) return { response: c.json({ error: 'rate_limited', message: 'Too many requests. Try again shortly.' }, 429) };
     return { principal };
   };
 
   app.get('/v1/backup/key', async (c) => {
     const auth = await authenticate(c);
     if ('response' in auth) return auth.response;
-    if (!limited(`owner:${auth.principal.ownerId}:key`, 30, 60_000)) return c.json({ error: 'rate_limited', message: 'Too many requests. Try again shortly.' }, 429);
+    if (!limited(`owner:${auth.principal.uid}:key`, 30, 60_000)) return c.json({ error: 'rate_limited', message: 'Too many requests. Try again shortly.' }, 429);
     const key = deps.keyRing.get(deps.activeKeyId);
     if (!key) return c.json({ error: 'key_unavailable', message: 'Backup encryption is temporarily unavailable.' }, 503);
     return c.json({
@@ -79,7 +82,7 @@ export function createApp(deps: AppDependencies) {
   app.post('/v1/backups', async (c) => {
     const auth = await authenticate(c);
     if ('response' in auth) return auth.response;
-    if (!limited(`owner:${auth.principal.ownerId}:write`, 10, 60 * 60_000)) return c.json({ error: 'rate_limited', message: 'Backup limit reached. Try again later.' }, 429);
+    if (!limited(`owner:${auth.principal.uid}:write`, 10, 60 * 60_000)) return c.json({ error: 'rate_limited', message: 'Backup limit reached. Try again later.' }, 429);
     const contentLength = Number(c.req.header('content-length') ?? '0');
     if (Number.isFinite(contentLength) && contentLength > MAX_REQUEST_BYTES) return c.json({ error: 'payload_too_large', message: 'Backup is larger than the supported limit.' }, 413);
     const parsedJson = await readLimitedJson(c.req.raw, MAX_REQUEST_BYTES);
@@ -93,16 +96,16 @@ export function createApp(deps: AppDependencies) {
     const uploadedAt = now().toISOString();
     const id = makeId();
     try {
-      await deps.store.put(id, parsed.data, uploadedAt);
+      await deps.store.put(auth.principal.ownerId, id, parsed.data, uploadedAt);
     } catch {
       return c.json({ error: 'storage_unavailable', message: 'Backup could not be saved.' }, 503);
     }
     let retentionPending = false;
     try {
-      const snapshots = await deps.store.list();
+      const snapshots = await deps.store.list(auth.principal.ownerId);
       if (snapshots.length > MAX_SNAPSHOTS) throw new Error('Snapshot count exceeds safe retention limit');
       const obsolete = snapshotsToDelete(snapshots);
-      if (obsolete.length) await deps.store.deleteMany(obsolete);
+      if (obsolete.length) await deps.store.deleteMany(auth.principal.ownerId, obsolete);
     } catch {
       // The object is already durable; report success and let a later upload retry retention.
       retentionPending = true;
@@ -119,7 +122,7 @@ export function createApp(deps: AppDependencies) {
     const cursor = decodeCursor(c.req.query('cursor'));
     if (cursor === false) return c.json({ error: 'invalid_cursor', message: 'Cursor is invalid.' }, 400);
     let snapshots: SnapshotRecord[];
-    try { snapshots = await deps.store.list(); }
+    try { snapshots = await deps.store.list(auth.principal.ownerId); }
     catch { return c.json({ error: 'storage_unavailable', message: 'Snapshots could not be listed.' }, 503); }
     if (snapshots.length > MAX_SNAPSHOTS) return c.json({ error: 'storage_unavailable', message: 'Snapshot listing exceeds the safe limit.' }, 503);
     snapshots.sort((a, b) => b.uploadedAt.localeCompare(a.uploadedAt) || b.id.localeCompare(a.id));
@@ -135,7 +138,7 @@ export function createApp(deps: AppDependencies) {
     const id = c.req.param('id');
     if (!isUuid(id)) return c.json({ error: 'not_found', message: 'Snapshot not found.' }, 404);
     try {
-      const stored = await deps.store.get(id);
+      const stored = await deps.store.get(auth.principal.ownerId, id);
       if (!stored) return c.json({ error: 'not_found', message: 'Snapshot not found.' }, 404);
       const contentKey = unwrapContentKey(stored.envelope.wrappedKey, stored.envelope.keyId, deps.keyRing);
       if (!contentKey) return c.json({ error: 'restore_key_unavailable', message: 'This backup cannot be restored with the available keys.' }, 409);
@@ -153,12 +156,12 @@ export function createApp(deps: AppDependencies) {
   app.delete('/v1/backups/:id', async (c) => {
     const auth = await authenticate(c);
     if ('response' in auth) return auth.response;
-    if (!limited(`owner:${auth.principal.ownerId}:delete`, 10, 60_000)) return c.json({ error: 'rate_limited', message: 'Too many delete requests. Try again shortly.' }, 429);
+    if (!limited(`owner:${auth.principal.uid}:delete`, 10, 60_000)) return c.json({ error: 'rate_limited', message: 'Too many delete requests. Try again shortly.' }, 429);
     const id = c.req.param('id');
     if (!isUuid(id)) return c.json({ error: 'not_found', message: 'Snapshot not found.' }, 404);
     try {
-      if (!await deps.store.get(id)) return c.json({ error: 'not_found', message: 'Snapshot not found.' }, 404);
-      await deps.store.delete(id);
+      if (!await deps.store.get(auth.principal.ownerId, id)) return c.json({ error: 'not_found', message: 'Snapshot not found.' }, 404);
+      await deps.store.delete(auth.principal.ownerId, id);
       return c.body(null, 204, noStoreHeaders);
     } catch {
       return c.json({ error: 'storage_unavailable', message: 'Snapshot could not be deleted.' }, 503);
