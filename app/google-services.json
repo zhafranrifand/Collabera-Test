@@ -12,7 +12,12 @@
           "package_name": "com.expensemail.app"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "892395625536-8qmpca4ivdcbtsfsurl63hngkd0o0sc0.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyDKpisWLygu4bOv1CBMYw1mPOIVS-C5o4U"
@@ -20,7 +25,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "892395625536-8qmpca4ivdcbtsfsurl63hngkd0o0sc0.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }
