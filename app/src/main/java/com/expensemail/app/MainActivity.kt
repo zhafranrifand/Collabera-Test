@@ -468,7 +468,13 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
         Scaffold(
             containerColor = Canvas,
             bottomBar = {
-                NavigationBar(modifier = Modifier.height(66.dp), containerColor = Ink, contentColor = Muted, tonalElevation = 0.dp) {
+                NavigationBar(
+                    modifier = Modifier.fillMaxWidth(),
+                    containerColor = Ink,
+                    contentColor = Muted,
+                    tonalElevation = 0.dp,
+                    windowInsets = WindowInsets.navigationBars,
+                ) {
                     listOf("Home", "Review", "Activity", "Settings").forEach { item ->
                         val icon = when (item) { "Home" -> Icons.Default.Home; "Review" -> Icons.Default.Inbox; "Activity" -> Icons.Default.AccountBalanceWallet; else -> Icons.Default.Settings }
                         NavigationBarItem(selected = tab == item || (tab == "Skipped" && item == "Review"), onClick = { tab = item }, icon = { Icon(icon, contentDescription = item) }, label = { Text(item, fontSize = 11.sp) }, colors = NavigationBarItemDefaults.colors(selectedIconColor = Mint, selectedTextColor = Mint, unselectedIconColor = Muted, unselectedTextColor = Muted, indicatorColor = Surface2))
