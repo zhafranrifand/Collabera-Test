@@ -1,7 +1,10 @@
 package com.expensemail.app
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import java.io.ByteArrayOutputStream
 import androidx.activity.ComponentActivity
@@ -42,6 +45,7 @@ import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.*
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -78,7 +82,6 @@ private val Muted = Color(0xFF9DAFC4)
 private val Canvas = Color(0xFF0C1728)
 private val White = Color(0xFFF7FAFC)
 private val Orange = Color(0xFFFFB86B)
-private const val SCAN_BATCH_DELAY_MILLIS = 15_000L
 private const val LIST_PAGE_SIZE = 25
 
 class MainActivity : ComponentActivity() {
@@ -154,12 +157,9 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
     var editing by remember { mutableStateOf<Expense?>(null) }
     var gmailConnected by remember { mutableStateOf(context.getSharedPreferences("expensemail", Context.MODE_PRIVATE).getBoolean("gmail_connected", false)) }
     var gmailStatus by remember { mutableStateOf("") }
-    var gmailSyncing by remember { mutableStateOf(false) }
-    var scanFetched by remember { mutableIntStateOf(0) }
-    var scanAdded by remember { mutableIntStateOf(0) }
-    var scanBatches by remember { mutableIntStateOf(0) }
-    var scanTargetTotal by remember { mutableIntStateOf(0) }
-    var scanProcessed by remember { mutableIntStateOf(0) }
+    var gmailAuthorizing by remember { mutableStateOf(false) }
+    val gmailSyncState by GmailSyncRuntime.state.collectAsState()
+    val gmailSyncing = gmailAuthorizing || gmailSyncState.isRunning
     var requestedTargetMessageId by remember { mutableStateOf<String?>(null) }
     var selectedSkipped by remember { mutableStateOf<SyncLedgerEntry?>(null) }
     var skippedAddMode by remember { mutableStateOf(false) }
@@ -237,12 +237,24 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
     }
     val gmailScope = remember { listOf(Scope(GmailInboxReader.READ_ONLY_SCOPE)) }
     var requestedSyncMode by remember { mutableStateOf(GmailSyncRequestMode.NORMAL) }
+    LaunchedEffect(gmailSyncState.revision) {
+        if (gmailSyncState.revision > 0) {
+            val snapshot = withContext(Dispatchers.IO) { syncStore.load() }
+            expenses = snapshot.expenses
+            syncLedger = snapshot.ledger
+            currentAccountKey = prefs.getString("gmail_account_key", null)
+            gmailConnected = prefs.getBoolean("gmail_connected", false)
+        }
+    }
+    LaunchedEffect(gmailSyncState.message) {
+        if (gmailSyncState.message.isNotBlank()) gmailStatus = gmailSyncState.message
+    }
     val scanProgressText = if (gmailSyncing) {
-        if (scanBatches == 0) "Connecting and checking the first batch…"
-        else if (scanTargetTotal > 0) "$scanProcessed of $scanTargetTotal skipped emails rechecked · $scanAdded added to Review"
-        else "$scanFetched emails checked across $scanBatches ${if (scanBatches == 1) "batch" else "batches"} · $scanAdded added to Review"
+        if (gmailSyncState.batches == 0) "Starting Gmail scan in the background…"
+        else if (gmailSyncState.targetTotal > 0) "${gmailSyncState.processed} of ${gmailSyncState.targetTotal} skipped emails rechecked · ${gmailSyncState.added} added to Review"
+        else "${gmailSyncState.fetched} emails checked across ${gmailSyncState.batches} ${if (gmailSyncState.batches == 1) "batch" else "batches"} · ${gmailSyncState.added} added to Review"
     } else null
-    val scanProgressFraction = if (gmailSyncing && scanTargetTotal > 0) scanProcessed.toFloat() / scanTargetTotal else null
+    val scanProgressFraction = if (gmailSyncing && gmailSyncState.targetTotal > 0) gmailSyncState.processed.toFloat() / gmailSyncState.targetTotal else null
     fun persist(updated: List<Expense>) {
         if (gmailSyncing) { gmailStatus = "Wait for Gmail sync to finish before changing transactions."; return }
         expenses = updated
@@ -259,99 +271,13 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
     fun syncWithToken(accessToken: String, mode: GmailSyncRequestMode, targetMessageId: String? = null) {
         gmailConnected = true
         prefs.edit().putBoolean("gmail_connected", true).apply()
-        val selectedStart = gmailStartDate
-        val selectedEnd = gmailEndDate
-        scanFetched = 0
-        scanAdded = 0
-        scanBatches = 0
-        scanTargetTotal = if (targetMessageId != null) 1 else 0
-        scanProcessed = 0
-        coroutineScope.launch {
-            gmailSyncing = true
-            gmailStatus = when (mode) {
-                GmailSyncRequestMode.RECHECK_SKIPPED -> "Rechecking skipped bank alerts…"
-                GmailSyncRequestMode.CONTINUE -> "Continuing Gmail scan…"
-                else -> "Checking bank alerts…"
+        gmailAuthorizing = false
+        GmailSyncRuntime.publish(GmailSyncUiState(isRunning = true, message = "Starting Gmail scan in the background…"))
+        runCatching { GmailSyncForegroundService.start(context, accessToken, gmailStartDate, gmailEndDate, mode, targetMessageId) }
+            .onFailure {
+                GmailSyncRuntime.publish(GmailSyncUiState(message = "Could not start background Gmail sync. Try again."))
+                gmailStatus = "Could not start background Gmail sync. Try again."
             }
-            try {
-                val engine = GmailSyncEngine(GmailReaderGateway, syncStore)
-                val bulkRecheckIds = if (mode == GmailSyncRequestMode.RECHECK_SKIPPED && targetMessageId == null) {
-                    withContext(Dispatchers.IO) {
-                        val account = normalizedAccountKey(GmailReaderGateway.getAccountEmail(accessToken))
-                        val ledger = syncStore.load().ledger
-                        val scoped = ledger.skippedForRecheck(account, Int.MAX_VALUE)
-                        val legacy = ledger.entries.filter {
-                            it.accountKey == LEGACY_UNSCOPED_ACCOUNT && it.state == SyncMessageState.LEGACY_UNKNOWN &&
-                                ledger.entryFor(account, it.messageId) == null
-                        }
-                        (scoped + legacy).distinctBy { it.messageId }.map { it.messageId }
-                    }
-                } else null
-                if (bulkRecheckIds != null && bulkRecheckIds.isEmpty()) {
-                    gmailStatus = "No skipped emails need rechecking."
-                    return@launch
-                }
-                if (bulkRecheckIds != null) scanTargetTotal = bulkRecheckIds.size
-                var bulkOffset = 0
-                var nextMode = mode
-                while (true) {
-                    val selectedIds = when {
-                        targetMessageId != null -> setOf(targetMessageId)
-                        bulkRecheckIds != null -> bulkRecheckIds.drop(bulkOffset).take(GmailSyncEngine.MAX_MESSAGE_GETS).toSet()
-                        else -> null
-                    }
-                    val report = withContext(Dispatchers.IO) {
-                        engine.run(accessToken, selectedStart, selectedEnd, nextMode, selectedIds)
-                    }
-                    val snapshot = withContext(Dispatchers.IO) { syncStore.load() }
-                    expenses = snapshot.expenses
-                    syncLedger = snapshot.ledger
-                    currentAccountKey = report.accountKey
-                    prefs.edit().putString("gmail_account_key", report.accountKey).apply()
-                    scanFetched += report.checked
-                    scanAdded += report.added
-                    scanBatches++
-                    if (report.error == null && bulkRecheckIds != null) bulkOffset += selectedIds.orEmpty().size
-                    if (bulkRecheckIds != null) scanProcessed = bulkOffset
-                    else if (targetMessageId != null && report.error == null) scanProcessed = 1
-                    val moreBulkRechecks = bulkRecheckIds != null && bulkOffset < bulkRecheckIds.size
-                    if (report.error?.contains("access expired", ignoreCase = true) == true) {
-                        gmailConnected = false
-                        prefs.edit().remove("gmail_connected").apply()
-                    }
-                    gmailStatus = when {
-                        report.error != null -> "Scan paused. ${report.error}"
-                        nextMode == GmailSyncRequestMode.RECHECK_SKIPPED && moreBulkRechecks -> "Rechecking more skipped emails automatically…"
-                        nextMode == GmailSyncRequestMode.RECHECK_SKIPPED -> "Recheck complete. $scanAdded added to Review."
-                        report.hasMore -> "Scanning older emails automatically…"
-                        else -> "Scan complete. $scanFetched emails checked; $scanAdded added to Review."
-                    }
-                    if (report.error != null || (nextMode == GmailSyncRequestMode.RECHECK_SKIPPED && !moreBulkRechecks) ||
-                        (nextMode != GmailSyncRequestMode.RECHECK_SKIPPED && !report.hasMore)) break
-                    if (nextMode == GmailSyncRequestMode.RECHECK_SKIPPED) {
-                        delay(SCAN_BATCH_DELAY_MILLIS)
-                        continue
-                    }
-                    nextMode = GmailSyncRequestMode.CONTINUE
-                    delay(SCAN_BATCH_DELAY_MILLIS)
-                }
-            } catch (e: Exception) {
-                val saved = runCatching { withContext(Dispatchers.IO) { syncStore.load() } }.getOrNull()
-                if (saved != null) { expenses = saved.expenses; syncLedger = saved.ledger }
-                gmailStatus = when {
-                    e is GmailApiException && e.isQuotaLimit -> "Scan paused because Gmail is limiting requests. Your progress is saved."
-                    e is GmailApiException && e.statusCode == 401 -> {
-                        gmailConnected = false
-                        prefs.edit().remove("gmail_connected").apply()
-                        "Gmail access expired. Reconnect Gmail and try again."
-                    }
-                    e is GmailApiException -> "Gmail could not complete sync. Try again."
-                    else -> e.message ?: "Gmail sync failed. Try again."
-                }
-            } finally {
-                gmailSyncing = false
-            }
-        }
     }
 
     val gmailAuthorizationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
@@ -359,13 +285,41 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
             runCatching { Identity.getAuthorizationClient(context).getAuthorizationResultFromIntent(result.data!!) }
                 .onSuccess { authorization ->
                     val token = authorization.accessToken
-                    if (token.isNullOrBlank()) { gmailSyncing = false; gmailStatus = "Google did not provide Gmail access. Please try again." }
+                    if (token.isNullOrBlank()) { gmailAuthorizing = false; gmailStatus = "Google did not provide Gmail access. Please try again." }
                     else syncWithToken(token, requestedSyncMode, requestedTargetMessageId)
                 }
-                .onFailure { gmailSyncing = false; gmailStatus = it.message ?: "Gmail authorization failed." }
+                .onFailure { gmailAuthorizing = false; gmailStatus = it.message ?: "Gmail authorization failed." }
         } else {
-            gmailSyncing = false
+            gmailAuthorizing = false
             gmailStatus = "Gmail access was not granted."
+        }
+    }
+
+    fun beginGmailAuthorization() {
+        if (activity == null) { gmailAuthorizing = false; gmailStatus = "Gmail authorization is unavailable in this screen."; return }
+        gmailAuthorizing = true
+        gmailStatus = "Requesting Gmail access…"
+        val request = AuthorizationRequest.builder().setRequestedScopes(gmailScope).build()
+        Identity.getAuthorizationClient(activity).authorize(request)
+            .addOnSuccessListener { authorization ->
+                if (authorization.hasResolution()) {
+                    val pendingIntent = authorization.pendingIntent
+                    if (pendingIntent == null) { gmailAuthorizing = false; gmailStatus = "Google did not return an authorization prompt." }
+                    else gmailAuthorizationLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                } else {
+                    val token = authorization.accessToken
+                    if (token.isNullOrBlank()) { gmailAuthorizing = false; gmailStatus = "Google did not provide Gmail access. Please try again." }
+                    else syncWithToken(token, requestedSyncMode, requestedTargetMessageId)
+                }
+            }
+            .addOnFailureListener { gmailAuthorizing = false; gmailStatus = it.message ?: "Gmail authorization failed." }
+    }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) beginGmailAuthorization()
+        else {
+            gmailAuthorizing = false
+            gmailStatus = "Allow notifications to keep Gmail scanning while you use other apps."
         }
     }
 
@@ -374,27 +328,10 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
         if (activity == null) { gmailStatus = "Gmail authorization is unavailable in this screen."; return }
         requestedSyncMode = mode
         requestedTargetMessageId = targetMessageId
-        scanFetched = 0
-        scanAdded = 0
-        scanBatches = 0
-        scanTargetTotal = if (targetMessageId != null) 1 else 0
-        scanProcessed = 0
-        gmailSyncing = true
-        gmailStatus = "Requesting Gmail access…"
-        val request = AuthorizationRequest.builder().setRequestedScopes(gmailScope).build()
-        Identity.getAuthorizationClient(activity).authorize(request)
-            .addOnSuccessListener { authorization ->
-                if (authorization.hasResolution()) {
-                    val pendingIntent = authorization.pendingIntent
-                    if (pendingIntent == null) { gmailSyncing = false; gmailStatus = "Google did not return an authorization prompt." }
-                    else gmailAuthorizationLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
-                } else {
-                    val token = authorization.accessToken
-                    if (token.isNullOrBlank()) { gmailSyncing = false; gmailStatus = "Google did not provide Gmail access. Please try again." }
-                    else syncWithToken(token, mode, targetMessageId)
-                }
-            }
-            .addOnFailureListener { gmailSyncing = false; gmailStatus = it.message ?: "Gmail authorization failed." }
+        gmailAuthorizing = true
+        if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else beginGmailAuthorization()
     }
 
     fun loadSkippedPreview(accessToken: String) {

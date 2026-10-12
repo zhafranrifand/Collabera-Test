@@ -1,17 +1,17 @@
 # Pocketlog — Android MVP
 
-An offline-first Android expense tracker that turns transaction alerts into reviewable expenses. Alerts can be shared from Gmail, or the app can manually search a selected date range for BCA, Livin’ by Mandiri, and Bank Jago emails after you grant Google read-only Gmail access. Parsed transactions always wait for your review.
+An offline-first Android expense tracker that turns transaction alerts into reviewable expenses. Alerts can be shared from Gmail, or the app can manually search a selected date range for BCA, Livin’ by Mandiri, Bank Jago, and UOB emails after you grant Google read-only Gmail access. Parsed transactions always wait for your review.
 
 ## Included
 
 - Monthly spend dashboard and recent activity
 - Review, edit, confirm, and delete flows
 - IDR display and basic merchant-based category suggestions
-- Bank hints from sender domains, including BCA, Livin’ by Mandiri, and Bank Jago
-- Parsing of the supplied bank templates: BCA `Total Payment`, Mandiri `Total Transaksi`, and Jago `Jumlah`
+- Bank hints from sender domains, including BCA, Livin’ by Mandiri, Bank Jago, and UOB
+- Parsing of supplied bank templates for BCA, Mandiri, Jago, and UOB
 - Transaction dates from the message body; transfer alerts labeled separately from expenses
 - Android Share target for transaction email text from Gmail
-- Manual Gmail sync with a selectable start/end date and supported bank sender filters
+- Gmail sync with a selectable date range and supported bank sender filters; long scans continue in the background with a cancelable notification
 - Local parsing; no email bodies or OAuth tokens are uploaded to a Pocketlog server
 - Local persistence with app-private SharedPreferences
 - Versioned JSON backup and restore, including Gmail scan history; restored data merges without replacing current transactions
@@ -34,7 +34,7 @@ Open a bank transaction alert in Gmail and choose **Share → Pocketlog**. If Gm
 
 ## Gmail access and setup
 
-Gmail sync uses Google's `gmail.readonly` scope. The app's sync button searches only the selected date range and the supported bank sender domains, then parses email content on-device. Google consent for this scope applies to Gmail messages broadly, even though the app's query is limited. Email bodies and OAuth tokens are not uploaded to a Pocketlog server. Imported message IDs are stored locally to prevent duplicates; disconnecting revokes Google's grant and clears that import history.
+Gmail sync uses Google's `gmail.readonly` scope. The app's sync button searches only the selected date range and the supported bank sender domains, then parses email content on-device. Long scans continue while you use another app; the ongoing notification shows status and lets you cancel. Android may still stop work after a force-stop, shutdown, or system time limit; completed batches are saved so you can resume when you return. Android 13 and newer require notification permission for the background scan. Google consent for this scope applies to Gmail messages broadly, even though the app's query is limited. Email bodies and OAuth tokens are not uploaded to a Pocketlog server. Imported message IDs are stored locally to prevent duplicates; disconnecting revokes Google's grant and clears that import history.
 
 In Settings, **Export restorable backup (JSON)** saves transactions and Gmail scan history. **Restore from backup** previews the merge first; it skips duplicates, preserves current-device records and dismissal choices, and does not resurrect dismissed alerts. **Export transactions as CSV** is for spreadsheets and does not contain the full scan history, so it cannot be used to restore the app.
 
@@ -46,7 +46,7 @@ If you prefer not to grant Gmail access, the Share flow remains available and on
 
 ## Parser limits
 
-Bank email templates vary. The MVP recognizes the labeled amount, date, and recipient patterns shown in the supplied BCA, Livin’ by Mandiri, and Jago examples. It handles Indonesian thousands/decimal separators and suggests a bank from the sender domain. A domain is only a hint, not proof that an email is genuine; review every imported transaction. If no transaction date is found, the import date is used. Transfer alerts are excluded from expense totals unless you change their type in Edit.
+Bank email templates vary. The MVP recognizes the labeled amount, date, and recipient patterns implemented for BCA, Livin’ by Mandiri, Jago, and UOB. It handles Indonesian thousands/decimal separators and suggests a bank from the sender domain. A domain is only a hint, not proof that an email is genuine; review every imported transaction. If no transaction date is found, the import date is used. Transfer alerts are excluded from expense totals unless you change their type in Edit.
 
 ## Beta builds through Firebase App Distribution
 
