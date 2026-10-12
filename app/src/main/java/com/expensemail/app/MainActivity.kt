@@ -58,10 +58,14 @@ import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.auth.api.identity.RevokeAccessRequest
 import com.google.android.gms.common.api.Scope
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseAuthException
+import com.google.firebase.auth.GoogleAuthProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.tasks.await
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -169,6 +173,8 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
     var skippedPreviewLoading by remember { mutableStateOf(false) }
     var skippedPreviewError by remember { mutableStateOf("") }
     var backupMessage by remember { mutableStateOf("") }
+    var cloudAccountEmail by remember { mutableStateOf(FirebaseAuth.getInstance().currentUser?.email) }
+    var cloudBackupBusy by remember { mutableStateOf(false) }
     var pendingBackup by remember { mutableStateOf<ExpenseBackup?>(null) }
     var backupPreview by remember { mutableStateOf<BackupMergePreview?>(null) }
     var activityDateMode by remember { mutableStateOf("All") }
@@ -236,6 +242,124 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
         }
     }
     val gmailScope = remember { listOf(Scope(GmailInboxReader.READ_ONLY_SCOPE)) }
+    val cloudBackupScopes = remember {
+        gmailScope + listOf(
+            Scope("https://www.googleapis.com/auth/userinfo.email"),
+            Scope("https://www.googleapis.com/auth/userinfo.profile"),
+        )
+    }
+    fun finishCloudSignIn(accessToken: String) {
+        cloudBackupBusy = true
+        coroutineScope.launch {
+            try {
+                val result = FirebaseAuth.getInstance()
+                    .signInWithCredential(GoogleAuthProvider.getCredential(null, accessToken)).await()
+                cloudAccountEmail = result.user?.email
+                backupMessage = if (cloudAccountEmail.isNullOrBlank())
+                    "Google sign-in succeeded, but the account email was unavailable."
+                else "Cloud backup connected as $cloudAccountEmail."
+            } catch (error: Exception) {
+                val authCode = (error as? FirebaseAuthException)?.errorCode
+                backupMessage = when (authCode) {
+                    "ERROR_OPERATION_NOT_ALLOWED" -> "Google sign-in is not enabled for this Firebase project. Ask a project owner to enable it."
+                    "ERROR_ACCOUNT_EXISTS_WITH_DIFFERENT_CREDENTIAL" -> "This Google account is already linked another way. Ask the project owner to review Firebase Authentication settings."
+                    else -> error.message ?: "Could not connect cloud backup. Try again."
+                }
+            } finally {
+                cloudBackupBusy = false
+            }
+        }
+    }
+    val cloudAuthorizationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK && result.data != null) {
+            runCatching { Identity.getAuthorizationClient(context).getAuthorizationResultFromIntent(result.data!!) }
+                .onSuccess { authorization ->
+                    val token = authorization.accessToken
+                    if (token.isNullOrBlank()) backupMessage = "Google did not provide account access. Please try again."
+                    else finishCloudSignIn(token)
+                }
+                .onFailure {
+                    cloudBackupBusy = false
+                    backupMessage = it.message ?: "Google account authorization failed."
+                }
+        } else {
+            cloudBackupBusy = false
+            backupMessage = "Google account authorization was not completed."
+        }
+    }
+    fun requestCloudSignIn() {
+        if (activity == null) { backupMessage = "Google sign-in is unavailable in this screen."; return }
+        cloudBackupBusy = true
+        val request = AuthorizationRequest.builder().setRequestedScopes(cloudBackupScopes).build()
+        Identity.getAuthorizationClient(activity).authorize(request)
+            .addOnSuccessListener { authorization ->
+                if (authorization.hasResolution()) {
+                    val pendingIntent = authorization.pendingIntent
+                    if (pendingIntent == null) {
+                        cloudBackupBusy = false
+                        backupMessage = "Google did not return an account prompt."
+                    } else cloudAuthorizationLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                } else {
+                    val token = authorization.accessToken
+                    if (token.isNullOrBlank()) {
+                        cloudBackupBusy = false
+                        backupMessage = "Google did not provide account access. Please try again."
+                    } else finishCloudSignIn(token)
+                }
+            }
+            .addOnFailureListener {
+                cloudBackupBusy = false
+                backupMessage = it.message ?: "Google account authorization failed."
+            }
+    }
+    suspend fun currentFirebaseIdToken(): String {
+        val user = FirebaseAuth.getInstance().currentUser ?: error("Connect a Google account for cloud backup first.")
+        return user.getIdToken(true).await().token ?: error("Firebase did not provide an ID token. Please reconnect cloud backup.")
+    }
+    fun uploadCloudBackup() {
+        if (gmailSyncing || cloudBackupBusy) return
+        cloudBackupBusy = true
+        backupMessage = "Encrypting and uploading backup…"
+        coroutineScope.launch {
+            try {
+                val idToken = currentFirebaseIdToken()
+                val backupJson = ExpenseBackupCodec.encode(expenses, syncStore.load().ledger)
+                val receipt = withContext(Dispatchers.IO) {
+                    val metadata = CloudBackupClient.fetchKey(idToken)
+                    val envelope = CloudBackupEnvelopeCodec.encrypt(backupJson.toByteArray(Charsets.UTF_8), metadata, java.time.Instant.now().toString())
+                    CloudBackupClient.upload(idToken, envelope)
+                }
+                backupMessage = "Encrypted cloud backup saved ${receipt.uploadedAt}."
+            } catch (error: Exception) {
+                backupMessage = error.message ?: "Cloud backup could not be uploaded. Try again."
+            } finally { cloudBackupBusy = false }
+        }
+    }
+    fun restoreLatestCloudBackup() {
+        if (gmailSyncing || cloudBackupBusy) return
+        cloudBackupBusy = true
+        backupMessage = "Finding your latest cloud backup…"
+        coroutineScope.launch {
+            try {
+                val idToken = currentFirebaseIdToken()
+                val snapshots = withContext(Dispatchers.IO) { CloudBackupClient.list(idToken) }
+                val latest = snapshots.firstOrNull()
+                if (latest == null) {
+                    backupMessage = "No cloud backups found for this account yet."
+                } else {
+                    val response = withContext(Dispatchers.IO) { CloudBackupClient.restore(idToken, latest.id) }
+                    val imported = ExpenseBackupCodec.decode(
+                        String(CloudBackupEnvelopeCodec.decrypt(response.envelope, response.contentKey), Charsets.UTF_8),
+                    )
+                    pendingBackup = imported
+                    backupPreview = ExpenseBackupCodec.merge(ExpenseBackup(expenses, syncStore.load().ledger), imported).preview
+                    backupMessage = "Latest cloud backup loaded. Review the merge before restoring."
+                }
+            } catch (error: Exception) {
+                backupMessage = error.message ?: "The cloud backup could not be restored. Try again."
+            } finally { cloudBackupBusy = false }
+        }
+    }
     var requestedSyncMode by remember { mutableStateOf(GmailSyncRequestMode.NORMAL) }
     LaunchedEffect(gmailSyncState.revision) {
         if (gmailSyncState.revision > 0) {
@@ -501,6 +625,16 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?) {
                         onExportBackup = { backupMessage = ""; backupExportLauncher.launch("pocketlog-backup.json") },
                         onExportCsv = { backupMessage = ""; csvExportLauncher.launch("pocketlog-transactions.csv") },
                         onImportBackup = { backupMessage = ""; backupImportLauncher.launch(arrayOf("application/json", "text/*")) },
+                        cloudAccountEmail = cloudAccountEmail,
+                        cloudBackupBusy = cloudBackupBusy,
+                        onConnectCloudBackup = { backupMessage = ""; requestCloudSignIn() },
+                        onUploadCloudBackup = { uploadCloudBackup() },
+                        onRestoreCloudBackup = { restoreLatestCloudBackup() },
+                        onDisconnectCloudBackup = {
+                            FirebaseAuth.getInstance().signOut()
+                            cloudAccountEmail = null
+                            backupMessage = "Cloud backup disconnected on this device. Saved cloud backups remain available."
+                        },
                         backupMessage = backupMessage,
                         backupActionsEnabled = !gmailSyncing,
                     )
@@ -1514,6 +1648,12 @@ private fun SettingsScreen(
     onExportBackup: () -> Unit,
     onExportCsv: () -> Unit,
     onImportBackup: () -> Unit,
+    cloudAccountEmail: String?,
+    cloudBackupBusy: Boolean,
+    onConnectCloudBackup: () -> Unit,
+    onUploadCloudBackup: () -> Unit,
+    onRestoreCloudBackup: () -> Unit,
+    onDisconnectCloudBackup: () -> Unit,
     backupMessage: String,
     backupActionsEnabled: Boolean,
 ) {
@@ -1569,6 +1709,27 @@ private fun SettingsScreen(
         Column(Modifier.fillMaxWidth().background(Surface, RoundedCornerShape(18.dp)).padding(17.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Your data", color = White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
             Text("Backups include transactions and Gmail scan history, but never message bodies or Google access tokens. Restore merges records and keeps this device’s existing data.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            Text("Cloud backup", color = White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+            Text(
+                if (cloudAccountEmail.isNullOrBlank()) "Connect Google to save an encrypted backup. Sign-in uses your account email; Gmail messages stay on this device."
+                else "Connected as $cloudAccountEmail. Data is encrypted on this device; the service can restore it when you ask.",
+                color = Muted, fontSize = 12.sp, lineHeight = 17.sp,
+            )
+            if (cloudAccountEmail.isNullOrBlank()) {
+                OutlinedButton(onClick = onConnectCloudBackup, enabled = backupActionsEnabled && !cloudBackupBusy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Mint)) {
+                    Text(if (cloudBackupBusy) "Connecting…" else "Connect cloud backup", fontWeight = FontWeight.SemiBold)
+                }
+            } else {
+                Button(onClick = onUploadCloudBackup, enabled = backupActionsEnabled && !cloudBackupBusy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = Mint, contentColor = Ink)) {
+                    Text(if (cloudBackupBusy) "Working…" else "Back up now", fontWeight = FontWeight.Bold)
+                }
+                OutlinedButton(onClick = onRestoreCloudBackup, enabled = backupActionsEnabled && !cloudBackupBusy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Mint)) {
+                    Text("Restore latest cloud backup", fontWeight = FontWeight.SemiBold)
+                }
+                TextButton(onClick = onDisconnectCloudBackup, enabled = !cloudBackupBusy, contentPadding = PaddingValues(horizontal = 0.dp)) {
+                    Text("Disconnect cloud backup", color = Orange)
+                }
+            }
             OutlinedButton(onClick = onExportBackup, enabled = backupActionsEnabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Mint)) {
                 Text("Export restorable backup (JSON)", fontWeight = FontWeight.SemiBold)
             }

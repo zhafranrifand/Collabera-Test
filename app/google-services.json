@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "892395625536",
+    "project_id": "expenselog-beta",
+    "storage_bucket": "expenselog-beta.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:892395625536:android:6a4869a9bc7853dd0593a5",
+        "android_client_info": {
+          "package_name": "com.expensemail.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDKpisWLygu4bOv1CBMYw1mPOIVS-C5o4U"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
