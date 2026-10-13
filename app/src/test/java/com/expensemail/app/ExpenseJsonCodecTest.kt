@@ -19,6 +19,7 @@ class ExpenseJsonCodecTest {
         assertNull(expense.emailSender)
         assertNull(expense.emailSubject)
         assertNull(expense.emailReceivedAtMillis)
+        assertNull(expense.categoryRuleMerchant)
     }
 
     @Test
@@ -34,7 +35,8 @@ class ExpenseJsonCodecTest {
             gmailAccountEmail = "owner@example.com",
             emailSender = "bca@bca.co.id",
             emailSubject = "BCA payment receipt",
-            emailReceivedAtMillis = 1_760_000_000_000L
+            emailReceivedAtMillis = 1_760_000_000_000L,
+            categoryRuleMerchant = "Shop",
         )
 
         val edited = imported.copy(merchant = "Corrected Shop")

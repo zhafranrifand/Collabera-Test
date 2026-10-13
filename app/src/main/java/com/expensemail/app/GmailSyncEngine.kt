@@ -36,7 +36,11 @@ internal object GmailReaderGateway : GmailSyncGateway {
     override fun getBankEmail(accessToken: String, id: String, cancellation: GmailSyncCancellation?) = GmailInboxReader.getBankEmail(accessToken, id, cancellation)
 }
 
-internal data class SyncSnapshot(val expenses: List<Expense>, val ledger: SyncLedger)
+internal data class SyncSnapshot(
+    val expenses: List<Expense>,
+    val ledger: SyncLedger,
+    val merchantRules: List<MerchantCategoryRule> = emptyList(),
+)
 
 /** Implement commit as one durable write of expenses and ledger, or throw on failure. */
 internal interface GmailSyncStore {
@@ -174,7 +178,7 @@ internal class GmailSyncEngine(
                 emailSender = email.sender,
                 emailSubject = email.subject,
                 emailReceivedAtMillis = email.receivedAtMillis,
-            ) else null
+            )?.let { MerchantCategoryRules.apply(it, snapshot.merchantRules) } else null
             val state = if (expense != null || existingExpense != null) SyncMessageState.IMPORTED else SyncMessageState.SKIPPED
             val entry = SyncLedgerEntry(
                 accountKey = account,
@@ -198,6 +202,7 @@ internal class GmailSyncEngine(
                     else -> snapshot.expenses
                 },
                 ledger = snapshot.ledger.withEntry(entry),
+                merchantRules = snapshot.merchantRules,
             ))
             checked++
             email.receivedAtMillis?.let { received ->

@@ -52,6 +52,55 @@ class GmailSyncEngineTest {
     private fun email(id: String, receivedAt: Long = received) = BankEmail(id, "bca@bca.co.id", "Receipt $id", "payment", receivedAt)
     private fun expense() = Expense(merchant = "Cafe", amount = 10_000, date = "9 Oct 2026", category = "Food & drink")
 
+    @Test fun importsNewExpenseUsingRememberedChoiceAndRetainsRulesAcrossCommits() {
+        val rule = MerchantCategoryRule("CAFE", "Shopping")
+        val store = FakeStore(SyncSnapshot(emptyList(), SyncLedger(), listOf(rule)))
+        val gateway = FakeGateway(mapOf(null to GmailMessagePage(listOf("a"), null)), mutableMapOf("a" to email("a")))
+        val engine = GmailSyncEngine(gateway, store, parser = { _, _ -> expense() })
+        val report = engine.run("token", start, end)
+        assertEquals(1, report.added)
+        assertEquals("Shopping", store.snapshot.expenses.single().category)
+        assertEquals("CAFE", store.snapshot.expenses.single().categoryRuleMerchant)
+        assertEquals(10_000L, store.snapshot.expenses.single().amount)
+        assertEquals(listOf(rule), store.snapshot.merchantRules)
+    }
+
+    @Test fun recheckingExistingExpenseDoesNotApplyNewRuleOrAlterConfirmation() {
+        val old = expense().copy(approved = true, gmailMessageId = "a", gmailAccountEmail = "user@example.com")
+        val ledger = SyncLedger(entries = listOf(SyncLedgerEntry("user@example.com", "a", SyncMessageState.SKIPPED)))
+        val store = FakeStore(SyncSnapshot(listOf(old), ledger, listOf(MerchantCategoryRule("Cafe", "Shopping"))))
+        val gateway = FakeGateway(emptyMap(), mutableMapOf("a" to email("a")))
+        val report = GmailSyncEngine(gateway, store, parser = { _, _ -> expense() })
+            .run("token", start, end, GmailSyncRequestMode.RECHECK_SKIPPED)
+        assertEquals(0, report.added)
+        val result = store.snapshot.expenses.single()
+        assertEquals("Food & drink", result.category)
+        assertTrue(result.approved)
+        assertEquals(null, result.categoryRuleMerchant)
+    }
+
+    @Test fun newlyImportedTransferKeepsItsTypeAndCategoryEvenWithMatchingExpenseRule() {
+        val store = FakeStore(SyncSnapshot(emptyList(), SyncLedger(), listOf(MerchantCategoryRule("Cafe", "Shopping"))))
+        val gateway = FakeGateway(mapOf(null to GmailMessagePage(listOf("a"), null)), mutableMapOf("a" to email("a")))
+        GmailSyncEngine(gateway, store, parser = { _, _ -> expense().copy(recordType = "Transfer", category = "Transfer") })
+            .run("token", start, end)
+        assertEquals("Transfer", store.snapshot.expenses.single().category)
+        assertEquals("Transfer", store.snapshot.expenses.single().recordType)
+    }
+
+    @Test fun receivedDateFallbackStillImportsWithRulesPresentAndKeepsUnidentifiedMerchantOther() {
+        val store = FakeStore(SyncSnapshot(emptyList(), SyncLedger(), listOf(MerchantCategoryRule("Cafe", "Shopping"))))
+        val fallbackEmail = BankEmail("a", "noreply@jago.com", "Debit card",
+            "Kamu telah melakukan transaksi sebesar Rp138.833 menggunakan kartu debit Jago.", received)
+        val gateway = FakeGateway(mapOf(null to GmailMessagePage(listOf("a"), null)), mutableMapOf("a" to fallbackEmail))
+        val report = GmailSyncEngine(gateway, store, parser = { _, _ -> null }).run("token", start, end)
+        assertEquals(1, report.added)
+        assertEquals("Jago debit card", store.snapshot.expenses.single().merchant)
+        assertEquals("Other", store.snapshot.expenses.single().category)
+        assertEquals(null, store.snapshot.expenses.single().categoryRuleMerchant)
+        assertEquals(1, store.snapshot.merchantRules.size)
+    }
+
     @Test fun partialFailureResumesCurrentPageWithoutDuplicatingCommittedExpense() {
         val gateway = FakeGateway(
             pages = mapOf(null to GmailMessagePage(listOf("a", "b", "c"), null)),

@@ -7,24 +7,49 @@ import android.content.SharedPreferences
 internal class AndroidGmailSyncStore(context: Context) : GmailSyncStore {
     private val prefs = context.getSharedPreferences("expensemail", Context.MODE_PRIVATE)
 
-    @Synchronized
-    override fun load(): SyncSnapshot {
+    override fun load(): SyncSnapshot = synchronized(STORE_LOCK) { loadLocked() }
+
+    private fun loadLocked(): SyncSnapshot {
         val expenses = prefs.getString("expenses", null)?.let { decodeExpenses(it) }
             ?.let(::normalizeSavedExpenses).orEmpty()
         val ledger = migratedLedger(prefs)
-        return SyncSnapshot(expenses, ledger)
+        return SyncSnapshot(expenses, ledger, readMerchantRules(prefs))
     }
 
-    @Synchronized
-    override fun commit(snapshot: SyncSnapshot) {
+    override fun commit(snapshot: SyncSnapshot) = synchronized(STORE_LOCK) {
+        // A running scan may carry rules from before a UI edit. Durable local entries win,
+        // including deletion tombstones, while imported rules can still be added.
+        val currentRules = readMerchantRules(prefs)
+        val rules = (snapshot.merchantRules.associateBy { it.key } + currentRules.associateBy { it.key })
+            .values.sortedBy { it.key }
+        writeLocked(snapshot.copy(merchantRules = rules))
+    }
+
+    fun update(transform: (SyncSnapshot) -> SyncSnapshot): SyncSnapshot = synchronized(STORE_LOCK) {
+        transform(loadLocked()).also(::writeLocked)
+    }
+
+    private fun writeLocked(snapshot: SyncSnapshot) {
         check(prefs.edit()
             .putString("expenses", encodeExpenses(snapshot.expenses))
             .putString(LEDGER_KEY, SyncLedgerCodec.encode(snapshot.ledger))
+            .putString(MERCHANT_RULES_KEY, MerchantCategoryRuleCodec.encode(snapshot.merchantRules))
             .commit()) { "Could not save Gmail sync progress on this device." }
     }
 
     companion object {
         private const val LEDGER_KEY = "gmail_sync_ledger"
+        private const val MERCHANT_RULES_KEY = "merchant_category_rules"
+        private val STORE_LOCK = Any()
+
+        fun readMerchantRules(context: Context): List<MerchantCategoryRule> = synchronized(STORE_LOCK) {
+            readMerchantRules(context.getSharedPreferences("expensemail", Context.MODE_PRIVATE))
+        }
+
+        private fun readMerchantRules(prefs: SharedPreferences): List<MerchantCategoryRule> {
+            val raw = prefs.getString(MERCHANT_RULES_KEY, null) ?: return emptyList()
+            return MerchantCategoryRuleCodec.decode(raw)
+        }
 
         fun readLedger(context: Context): SyncLedger =
             migratedLedger(context.getSharedPreferences("expensemail", Context.MODE_PRIVATE))

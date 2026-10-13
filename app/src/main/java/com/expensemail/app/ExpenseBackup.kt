@@ -7,6 +7,7 @@ import org.json.JSONObject
 data class ExpenseBackup(
     val transactions: List<Expense>,
     val syncLedger: SyncLedger,
+    val merchantRules: List<MerchantCategoryRule> = emptyList(),
 )
 
 data class BackupMergePreview(
@@ -18,6 +19,7 @@ data class BackupMergePreview(
     val dismissalsPreserved: Int,
     val cursorsAdded: Int,
     val lastReportImported: Boolean,
+    val merchantRulesAdded: Int = 0,
 )
 
 data class BackupMergeResult(
@@ -26,10 +28,10 @@ data class BackupMergeResult(
 )
 
 object ExpenseBackupCodec {
-    const val CURRENT_VERSION = 1
+    const val CURRENT_VERSION = 2
     const val MAX_INPUT_BYTES = 25 * 1024 * 1024
 
-    fun encode(transactions: List<Expense>, syncLedger: SyncLedger): String {
+    fun encode(transactions: List<Expense>, syncLedger: SyncLedger, merchantRules: List<MerchantCategoryRule> = emptyList()): String {
         val root = JSONObject().apply {
             put("format", "pocketlog-backup")
             put("version", CURRENT_VERSION)
@@ -39,6 +41,7 @@ object ExpenseBackupCodec {
                 }
             })
             put("syncLedger", JSONObject(SyncLedgerCodec.encode(syncLedger)))
+            put("merchantRules", JSONArray(MerchantCategoryRuleCodec.encode(merchantRules.sortedBy { it.key })))
         }
         return canonicalJson(root)
     }
@@ -50,7 +53,7 @@ object ExpenseBackupCodec {
         val root = JSONObject(raw)
         require(root.optString("format") == "pocketlog-backup") { "This is not a Pocketlog backup." }
         val version = root.optInt("version", -1)
-        require(version == CURRENT_VERSION) { "Unsupported backup version: $version" }
+        require(version == 1 || version == CURRENT_VERSION) { "Unsupported backup version: $version" }
         require(root.has("transactions") && !root.isNull("transactions")) { "Backup is missing transactions." }
         require(root.has("syncLedger") && root.optJSONObject("syncLedger") != null) { "Backup is missing Gmail sync history." }
         val transactionArray = root.getJSONArray("transactions")
@@ -59,7 +62,11 @@ object ExpenseBackupCodec {
         }
         val transactions = decodeExpenses(transactionArray.toString())
         val ledger = SyncLedgerCodec.decode(canonicalJson(root.getJSONObject("syncLedger")))
-        return ExpenseBackup(transactions, ledger)
+        val rules = if (version == 1) emptyList() else {
+            require(root.optJSONArray("merchantRules") != null) { "Backup is missing valid merchant rules." }
+            MerchantCategoryRuleCodec.decode(root.getJSONArray("merchantRules").toString())
+        }
+        return ExpenseBackup(transactions, ledger, rules)
     }
 
     /** Merge imported state into the current device state. Current transactions win conflicts. */
@@ -131,9 +138,14 @@ object ExpenseBackupCodec {
             lastReport = current.syncLedger.lastReport ?: imported.syncLedger.lastReport,
             legacyMigrated = current.syncLedger.legacyMigrated || imported.syncLedger.legacyMigrated,
         )
+        // Current rules include deletion tombstones, preventing an older backup from reviving them.
+        val currentRules = current.merchantRules.associateBy { it.key }
+        val importedRules = imported.merchantRules.associateBy { it.key }
+        val mergedRules = (importedRules + currentRules).values.sortedBy { it.key }
         val result = ExpenseBackup(
             transactions = mergedTransactions,
             syncLedger = ledger,
+            merchantRules = mergedRules,
         )
         return BackupMergeResult(
             backup = result,
@@ -146,6 +158,7 @@ object ExpenseBackupCodec {
                 dismissalsPreserved = mergedEntries.count { it.state == SyncMessageState.DISMISSED },
                 cursorsAdded = (imported.syncLedger.cursors.map { it.key }.toSet() - current.syncLedger.cursors.map { it.key }.toSet()).size,
                 lastReportImported = reportImported,
+                merchantRulesAdded = (importedRules.keys - currentRules.keys).count { importedRules[it]?.deleted == false },
             ),
         )
     }
@@ -169,7 +182,7 @@ object ExpenseBackupCodec {
             "Transaction $index is missing a valid 'amount'."
         }
         require(json.opt("approved") is Boolean) { "Transaction $index is missing a valid 'approved' status." }
-        listOf("gmailMessageId", "gmailAccountEmail", "emailSender", "emailSubject").forEach { name ->
+        listOf("gmailMessageId", "gmailAccountEmail", "emailSender", "emailSubject", "categoryRuleMerchant").forEach { name ->
             require(!json.has(name) || json.isNull(name) || json.opt(name) is String) {
                 "Transaction $index has an invalid '$name'."
             }

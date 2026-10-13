@@ -27,10 +27,18 @@ internal class ExpenseRepository(context: Context) {
                 "Could not save transaction review changes on this device."
             }
         }
-        return SyncSnapshot(expenses, AndroidGmailSyncStore.readLedger(appContext))
+        val rules = runCatching { AndroidGmailSyncStore.readMerchantRules(appContext) }
+            .onFailure {
+                loadWarning = listOfNotNull(loadWarning,
+                    "Saved merchant rules could not be read. The original rules were preserved; edits are paused until they can be recovered.")
+                    .joinToString(" ")
+            }.getOrDefault(emptyList())
+        return SyncSnapshot(expenses, AndroidGmailSyncStore.readLedger(appContext), rules)
     }
 
     fun commitSnapshot(snapshot: SyncSnapshot) = syncStore.commit(snapshot)
+
+    fun updateSnapshot(transform: (SyncSnapshot) -> SyncSnapshot): SyncSnapshot = syncStore.update(transform)
 
     fun saveExpenses(expenses: List<Expense>) {
         // Match the former UI save behavior: update SharedPreferences immediately in memory,
@@ -69,7 +77,11 @@ internal class ExpenseRepository(context: Context) {
     fun loadGmailStartDate(): String? = preferences.getString("gmail_start_date", null)
     fun loadGmailEndDate(): String? = preferences.getString("gmail_end_date", null)
 
-    fun encodeBackup(snapshot: SyncSnapshot): String = ExpenseBackupCodec.encode(snapshot.expenses, snapshot.ledger)
+    fun encodeBackup(snapshot: SyncSnapshot): String {
+        // A corrupt rules document must not become an apparently successful empty-rules backup.
+        AndroidGmailSyncStore.readMerchantRules(appContext)
+        return ExpenseBackupCodec.encode(snapshot.expenses, snapshot.ledger, snapshot.merchantRules)
+    }
 
     fun decodeBackup(raw: String): ExpenseBackup = ExpenseBackupCodec.decode(raw)
 

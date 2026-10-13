@@ -8,6 +8,71 @@ import org.json.JSONObject
 
 class ExpenseBackupTest {
     @Test
+    fun versionOneBackupRestoresWithoutMerchantRules() {
+        val root = JSONObject(ExpenseBackupCodec.encode(listOf(expense("old", "Cafe", 42)), SyncLedger()))
+        root.put("version", 1)
+        root.remove("merchantRules")
+
+        val restored = ExpenseBackupCodec.decode(root.toString())
+
+        assertEquals("old", restored.transactions.single().id)
+        assertTrue(restored.merchantRules.isEmpty())
+    }
+
+    @Test
+    fun versionTwoBackupRoundTripsRulesTombstonesAndCategoryProvenance() {
+        val rules = listOf(
+            MerchantCategoryRule("Cafe", "Food & drink"),
+            MerchantCategoryRule("Former shop", "Shopping", deleted = true),
+        )
+        val transaction = expense("new", "Cafe", 42).copy(category = "Food & drink", categoryRuleMerchant = "Cafe")
+        val encoded = ExpenseBackupCodec.encode(listOf(transaction), SyncLedger(), rules)
+        val restored = ExpenseBackupCodec.decode(encoded)
+
+        assertEquals(2, JSONObject(encoded).getInt("version"))
+        assertEquals(transaction, restored.transactions.single())
+        assertEquals(rules.sortedBy { it.key }, restored.merchantRules)
+        assertEquals(encoded, ExpenseBackupCodec.encode(restored.transactions, restored.syncLedger, restored.merchantRules))
+    }
+
+    @Test
+    fun currentNormalizedMerchantRuleAndDeletionWinBackupConflicts() {
+        val local = listOf(
+            MerchantCategoryRule("Cafe", "Food & drink"),
+            MerchantCategoryRule("Former shop", "Shopping", deleted = true),
+        )
+        val remote = listOf(
+            MerchantCategoryRule("  CAFE  ", "Shopping"),
+            MerchantCategoryRule("Former SHOP", "Groceries"),
+            MerchantCategoryRule("New grocery", "Groceries"),
+        )
+        val original = expense("confirmed", "New grocery", 42).copy(approved = true, category = "Other")
+        val result = ExpenseBackupCodec.merge(
+            ExpenseBackup(listOf(original), SyncLedger(), local),
+            ExpenseBackup(emptyList(), SyncLedger(), remote),
+        )
+
+        assertEquals(local[0], result.backup.merchantRules.single { it.key == local[0].key })
+        assertTrue(result.backup.merchantRules.single { it.key == local[1].key }.deleted)
+        assertEquals(1, result.preview.merchantRulesAdded)
+        assertEquals(original, result.backup.transactions.single())
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun versionTwoMissingRulesIsRejected() {
+        val root = JSONObject(ExpenseBackupCodec.encode(emptyList(), SyncLedger()))
+        root.remove("merchantRules")
+        ExpenseBackupCodec.decode(root.toString())
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun invalidBackupRuleCategoryIsRejectedRatherThanSilentlyDropped() {
+        val root = JSONObject(ExpenseBackupCodec.encode(emptyList(), SyncLedger(), listOf(MerchantCategoryRule("Cafe", "Food & drink"))))
+        root.getJSONArray("merchantRules").getJSONObject(0).put("category", "Anything")
+        ExpenseBackupCodec.decode(root.toString())
+    }
+
+    @Test
     fun backupRoundTripsTransactionsAndCompleteSyncLedgerDeterministically() {
         val expense = expense("tx-1", "BCA, online", 12_500, subject = "Paid \"today\"")
         val ledger = SyncLedger(

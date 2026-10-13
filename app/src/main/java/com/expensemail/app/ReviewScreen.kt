@@ -282,6 +282,9 @@ internal fun PendingCard(
                 Text(if (expanded) "Less" else "Details", color = Mint, fontSize = 12.sp)
             }
         }
+        expense.categoryRuleMerchant?.let {
+            Text("Category from your remembered merchant", color = Mint, fontSize = 11.sp, modifier = Modifier.padding(start = 48.dp))
+        }
         if (expense.hasMalformedGmailMerchant()) {
             Text(
                 "Merchant text looks like email formatting or footer content. Edit it before confirming, or delete the row if it is not a transaction.",
