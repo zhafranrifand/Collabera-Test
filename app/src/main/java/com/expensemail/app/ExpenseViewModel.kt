@@ -50,12 +50,46 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
 
     internal fun commitSnapshot(snapshot: SyncSnapshot) {
         repository.commitSnapshot(snapshot)
-        _data.value = ExpenseDataState(snapshot)
+        _data.value = loadData()
     }
 
     fun saveExpenses(expenses: List<Expense>) {
         repository.saveExpenses(expenses)
         _data.value = _data.value.copy(snapshot = _data.value.snapshot.copy(expenses = expenses), warning = null)
+    }
+
+    fun suggestCategory(expense: Expense): Expense = MerchantCategoryRules.apply(expense, snapshot().merchantRules)
+
+    fun saveEditedExpense(expense: Expense, rememberCategory: Boolean) {
+        val updated = repository.updateSnapshot { current ->
+            val previous = current.expenses.firstOrNull { it.id == expense.id }
+                ?: error("This transaction is no longer available. Refresh and try again.")
+            val manuallyChanged = previous.category != expense.category || previous.merchant != expense.merchant ||
+                previous.recordType != expense.recordType
+            val edited = if (manuallyChanged) expense.copy(categoryRuleMerchant = null) else expense
+            val rules = if (rememberCategory) {
+                require(edited.recordType == "Expense" && MerchantCategoryRules.canRemember(edited.merchant) && edited.category in EXPENSE_CATEGORIES) {
+                    "Choose a valid expense merchant and category before remembering it."
+                }
+                MerchantCategoryRules.remember(current.merchantRules, edited.merchant, edited.category)
+            } else current.merchantRules
+            current.copy(expenses = current.expenses.map { if (it.id == edited.id) edited else it }, merchantRules = rules)
+        }
+        _data.value = ExpenseDataState(updated)
+    }
+
+    fun rememberMerchantCategory(merchant: String, category: String) {
+        val updated = repository.updateSnapshot { current ->
+            current.copy(merchantRules = MerchantCategoryRules.remember(current.merchantRules, merchant, category))
+        }
+        _data.value = ExpenseDataState(updated)
+    }
+
+    fun removeMerchantCategoryRule(key: String) {
+        val updated = repository.updateSnapshot { current ->
+            current.copy(merchantRules = MerchantCategoryRules.remove(current.merchantRules, key))
+        }
+        _data.value = ExpenseDataState(updated)
     }
 
     fun exportBackupJson(): String = repository.encodeBackup(snapshot())
@@ -74,7 +108,7 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
 
     private fun stageBackup(imported: ExpenseBackup, message: String) {
         val preview = ExpenseBackupCodec.merge(
-            ExpenseBackup(snapshot().expenses, snapshot().ledger),
+            ExpenseBackup(snapshot().expenses, snapshot().ledger, snapshot().merchantRules),
             imported,
         ).preview
         _backup.value = _backup.value.copy(message = message, pendingBackup = imported, preview = preview)
@@ -91,8 +125,11 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
         }
         val imported = _backup.value.pendingBackup ?: return
         runCatching {
-            val merged = ExpenseBackupCodec.merge(ExpenseBackup(snapshot().expenses, snapshot().ledger), imported).backup
-            commitSnapshot(SyncSnapshot(merged.transactions, merged.syncLedger))
+            val updated = repository.updateSnapshot { current ->
+                val merged = ExpenseBackupCodec.merge(ExpenseBackup(current.expenses, current.ledger, current.merchantRules), imported).backup
+                SyncSnapshot(merged.transactions, merged.syncLedger, merged.merchantRules)
+            }
+            _data.value = ExpenseDataState(updated)
             cancelRestore()
             setBackupMessage("Restore complete. Existing transactions and dismissals were preserved.")
         }.onFailure { setBackupMessage("Could not restore backup: ${it.message ?: "unknown error"}") }

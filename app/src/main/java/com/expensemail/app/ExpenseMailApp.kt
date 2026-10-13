@@ -100,7 +100,7 @@ private fun PocketlogBottomBar(tab: String, onSelect: (String) -> Unit) {
         "Activity" -> "Activity"
         "Categories", "Recurring", "Insights" -> "Spending"
         "Target" -> "Plan"
-        "Settings" -> null
+        "Settings", "MerchantRules" -> null
         else -> "Home"
     }
     val destinations = listOf("Coverage", "Activity", "Home", "Spending", "Plan")
@@ -551,7 +551,7 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?, viewModel: ExpenseV
                         onImport = {
                             val parsed = parseAlert(importText, senderText)
                             if (parsed == null) error = "This doesn't look like a supported bank transaction alert. Check the sender and transaction details."
-                            else { persist(listOf(parsed.copy(approved = false)) + expenses); importText = ""; senderText = ""; error = "Added to review"; manualImportExpanded = false }
+                            else { persist(listOf(viewModel.suggestCategory(parsed.copy(approved = false))) + expenses); importText = ""; senderText = ""; error = "Added to review"; manualImportExpanded = false }
                         },
                         onApprove = { id ->
                             val target = expenses.firstOrNull { it.id == id }
@@ -626,6 +626,19 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?, viewModel: ExpenseV
                         onRecheckOne = { requestGmailSync(GmailSyncRequestMode.RECHECK_SKIPPED, it.messageId) },
                         actionsEnabled = !gmailSyncing,
                     )
+                    "MerchantRules" -> MerchantRulesScreen(
+                        rules = data.snapshot.merchantRules,
+                        actionsEnabled = !gmailSyncing,
+                        onBack = { tab = "Settings" },
+                        onChangeCategory = { merchant, category ->
+                            if (!gmailSyncing) runCatching { viewModel.rememberMerchantCategory(merchant, category) }
+                                .onFailure { coroutineScope.launch { snackbarHostState.showSnackbar(it.message ?: "Could not update merchant rule.") } }
+                        },
+                        onDelete = { key ->
+                            if (!gmailSyncing) runCatching { viewModel.removeMerchantCategoryRule(key) }
+                                .onFailure { coroutineScope.launch { snackbarHostState.showSnackbar(it.message ?: "Could not remove merchant rule.") } }
+                        },
+                    )
                     else -> SettingsScreen(
                         onManualImport = { error = ""; manualImportExpanded = true; tab = "Review" },
                         onSyncGmail = {
@@ -658,12 +671,18 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?, viewModel: ExpenseV
                         onDisconnectCloudBackup = { viewModel.disconnectCloudBackup() },
                         backupMessage = backupState.message,
                         backupActionsEnabled = !gmailSyncing,
+                        merchantRulesCount = data.snapshot.merchantRules.count { !it.deleted },
+                        onManageMerchantRules = { tab = "MerchantRules" },
                     )
                 }
             }
         }
-        editing?.let { expense -> EditExpenseDialog(expense, onDismiss = { editing = null }, onSave = { updated ->
-            if (!gmailSyncing) { persist(expenses.map { if (it.id == updated.id) updated else it }); editing = null }
+        editing?.let { expense -> EditExpenseDialog(expense, onDismiss = { editing = null }, onSave = { updated, rememberCategory ->
+            if (!gmailSyncing) {
+                runCatching { viewModel.saveEditedExpense(updated, rememberCategory) }
+                    .onSuccess { editing = null }
+                    .onFailure { coroutineScope.launch { snackbarHostState.showSnackbar(it.message ?: "Could not save transaction.") } }
+            }
             else gmailStatus = "Wait for Gmail sync to finish before changing transactions."
         }) }
         val preview = backupState.preview
@@ -687,6 +706,7 @@ fun ExpenseMailApp(context: Context, incomingEmail: String?, viewModel: ExpenseV
                 onDismiss = { selectedSkipped = null; skippedPreview = null; skippedAddMode = false },
                 onRetry = { openSkippedEmail(entry, skippedAddMode) },
                 onAddMode = { skippedAddMode = true; skippedActionError = "" },
+                suggestCategory = { viewModel.suggestCategory(it) },
                 onSave = { proposed ->
                     if (gmailSyncing) skippedActionError = "Wait for Gmail sync to finish."
                     else {

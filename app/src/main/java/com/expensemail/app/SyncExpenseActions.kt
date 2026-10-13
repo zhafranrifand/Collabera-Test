@@ -10,7 +10,7 @@ internal fun SyncSnapshot.withDismissedExpense(id: String, nowMillis: Long): Syn
     val previous = ledger.entryFor(account, messageId)
     val dismissed = (previous ?: SyncLedgerEntry(account, messageId, SyncMessageState.DISMISSED))
         .copy(state = SyncMessageState.DISMISSED, expenseId = null, checkedAtMillis = nowMillis)
-    return SyncSnapshot(remaining, ledger.withEntry(dismissed))
+    return copy(expenses = remaining, ledger = ledger.withEntry(dismissed))
 }
 
 /** Keeps an explicit decision for a skipped message so future scans leave it alone. */
@@ -44,7 +44,7 @@ internal fun SyncSnapshot.withManuallyAddedSkippedEmail(
         emailSubject = current.subject,
         emailReceivedAtMillis = current.receivedAtMillis,
     )
-    return SyncSnapshot(
+    return copy(
         expenses = listOf(added) + expenses,
         ledger = ledger.withEntry(current.copy(
             state = SyncMessageState.IMPORTED,

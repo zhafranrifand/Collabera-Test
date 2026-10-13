@@ -21,6 +21,7 @@ internal fun encodeExpenses(expenses: List<Expense>): String = JSONArray().apply
             expense.emailSender?.let { put("emailSender", it) }
             expense.emailSubject?.let { put("emailSubject", it) }
             expense.emailReceivedAtMillis?.let { put("emailReceivedAtMillis", it) }
+            expense.categoryRuleMerchant?.let { put("categoryRuleMerchant", it) }
         })
     }
 }.toString()
@@ -49,7 +50,8 @@ internal fun decodeExpenses(
             emailSender = json.optionalString("emailSender"),
             emailSubject = json.optionalString("emailSubject"),
             emailReceivedAtMillis = json.optLong("emailReceivedAtMillis")
-                .takeIf { json.has("emailReceivedAtMillis") && !json.isNull("emailReceivedAtMillis") && it > 0 }
+                .takeIf { json.has("emailReceivedAtMillis") && !json.isNull("emailReceivedAtMillis") && it > 0 },
+            categoryRuleMerchant = json.optionalString("categoryRuleMerchant"),
         )
     }
 }

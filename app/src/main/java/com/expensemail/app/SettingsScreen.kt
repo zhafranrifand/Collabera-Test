@@ -108,6 +108,8 @@ internal fun SettingsScreen(
     onDisconnectCloudBackup: () -> Unit,
     backupMessage: String,
     backupActionsEnabled: Boolean,
+    merchantRulesCount: Int,
+    onManageMerchantRules: () -> Unit,
 ) {
     var showScanDetails by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 22.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
@@ -159,8 +161,15 @@ internal fun SettingsScreen(
             }
         }
         Column(Modifier.fillMaxWidth().background(Surface, RoundedCornerShape(18.dp)).padding(17.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Merchant categories", color = White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            Text("Remember a category when editing a transaction. Future expenses from that exact merchant use your choice and still need review.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            OutlinedButton(onClick = onManageMerchantRules, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Mint)) {
+                Text("Manage remembered merchants ($merchantRulesCount)", fontWeight = FontWeight.SemiBold)
+            }
+        }
+        Column(Modifier.fillMaxWidth().background(Surface, RoundedCornerShape(18.dp)).padding(17.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Your data", color = White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-            Text("Backups include transactions and Gmail scan history, but never message bodies or Google access tokens. Restore merges records and keeps this device’s existing data.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            Text("Backups include transactions, Gmail scan history, and remembered merchant categories, but never message bodies or Google access tokens. Restore merges records and keeps this device’s existing data.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
             Text("Cloud backup", color = White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
             Text(
                 if (cloudAccountEmail.isNullOrBlank()) "Connect a Google account for backups. Gmail access is separate and is only used for email scanning and review."
@@ -211,6 +220,7 @@ internal fun BackupMergeDialog(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Review the merge before changing this device.", color = Muted)
                 Text("${preview.transactionsAdded} transactions will be added", color = White)
+                Text("${preview.merchantRulesAdded} merchant rules will be added", color = White)
                 Text("${preview.duplicateTransactionIds + preview.duplicateGmailMessages} duplicates will be skipped", color = White)
                 Text("${preview.dismissedTransactionsSkipped} dismissed emails will stay dismissed", color = White)
                 Text("${preview.ledgerEntriesAdded} scan-history records and ${preview.cursorsAdded} saved scan cursors will be added", color = White)
@@ -248,41 +258,53 @@ internal fun DateChoice(label: String, date: LocalDate, onDateSelected: (LocalDa
 }
 
 @Composable
-internal fun EditExpenseDialog(expense: Expense, onDismiss: () -> Unit, onSave: (Expense) -> Unit) {
+internal fun EditExpenseDialog(expense: Expense, onDismiss: () -> Unit, onSave: (Expense, Boolean) -> Unit) {
     var merchant by remember(expense.id) { mutableStateOf(expense.merchant) }
     var amount by remember(expense.id) { mutableStateOf(expense.amount.toString()) }
     var category by remember(expense.id) { mutableStateOf(expense.category) }
     var recordType by remember(expense.id) { mutableStateOf(expense.recordType) }
     var categoryMenu by remember { mutableStateOf(false) }
     var typeMenu by remember { mutableStateOf(false) }
-    val categories = EXPENSE_CATEGORIES
+    var rememberCategory by remember(expense.id) { mutableStateOf(false) }
+    val categories = EXPENSE_CATEGORIES.filter { it != "Transfer" }
+    val canRemember = recordType == "Expense" && MerchantCategoryRules.canRemember(merchant)
+    val validCategory = category.takeIf { it in categories } ?: "Other"
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = Surface,
         title = { Text("Edit transaction", color = White) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedTextField(merchant, { merchant = it }, label = { Text("Merchant") }, singleLine = true)
+            Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(merchant, { merchant = it; rememberCategory = false }, label = { Text("Merchant") }, singleLine = true)
                 OutlinedTextField(amount, { amount = it.filter(Char::isDigit) }, label = { Text("Amount (IDR)") }, singleLine = true)
                 Text("Transaction type", color = Muted, fontSize = 12.sp)
                 Box {
                     OutlinedButton(onClick = { typeMenu = true }, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) { Text(recordType, modifier = Modifier.weight(1f)); Text("Change") }
                     DropdownMenu(expanded = typeMenu, onDismissRequest = { typeMenu = false }) {
-                        listOf("Expense", "Transfer", "Income").forEach { value -> DropdownMenuItem(text = { Text(value) }, onClick = { recordType = value; typeMenu = false }) }
+                        listOf("Expense", "Transfer", "Income").forEach { value -> DropdownMenuItem(text = { Text(value) }, onClick = { recordType = value; if (value != "Expense") rememberCategory = false; typeMenu = false }) }
                     }
                 }
                 if (recordType == "Expense") {
                     Text("Category", color = Muted, fontSize = 12.sp)
                     Box {
-                        OutlinedButton(onClick = { categoryMenu = true }, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) { Text(category, modifier = Modifier.weight(1f)); Text("Change") }
+                        OutlinedButton(onClick = { categoryMenu = true }, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) { Text(validCategory, modifier = Modifier.weight(1f)); Text("Change") }
                         DropdownMenu(expanded = categoryMenu, onDismissRequest = { categoryMenu = false }) {
                             categories.forEach { value -> DropdownMenuItem(text = { Text(value) }, onClick = { category = value; categoryMenu = false }) }
+                        }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = rememberCategory && canRemember, onCheckedChange = { rememberCategory = it }, enabled = canRemember, colors = CheckboxDefaults.colors(checkedColor = Mint, uncheckedColor = Muted))
+                        Column(Modifier.weight(1f)) {
+                            Text("Remember category for this merchant", color = White, fontSize = 13.sp)
+                            Text(if (canRemember) "Future imports only. Review still required." else "Enter a recognizable merchant name first.", color = Muted, fontSize = 11.sp)
                         }
                     }
                 }
             }
         },
-        confirmButton = { TextButton(onClick = { amount.toLongOrNull()?.let { onSave(expense.copy(merchant = merchant.ifBlank { "Unknown merchant" }, amount = it, category = if (recordType == "Expense") category else recordType, recordType = recordType)) } }) { Text("Save", color = Mint) } },
+        confirmButton = { TextButton(enabled = merchant.isNotBlank() && (amount.toLongOrNull() ?: 0L) > 0L, onClick = {
+            amount.toLongOrNull()?.let { onSave(expense.copy(merchant = merchant.trim(), amount = it, category = if (recordType == "Expense") validCategory else recordType, recordType = recordType), rememberCategory && canRemember) }
+        }) { Text("Save", color = Mint) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = Muted) } }
     )
 }

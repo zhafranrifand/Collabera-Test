@@ -34,6 +34,7 @@ Version **1.1.0** · Android (Kotlin, Jetpack Compose) · Min SDK 26 · Target S
 **Review and organize**
 - Review queue with edit, confirm, bulk confirm, and delete
 - Merchant-based category suggestions and bank detection from the sender
+- Opt-in remembered merchant categories: save a choice while editing, then manage or forget it in Settings
 - Transfers are labeled separately and excluded from spending totals unless you change the type
 
 **Understand your spending**
@@ -87,7 +88,7 @@ How parsing works:
 - Most templates without a transaction date are skipped. One Jago card/fee format uses Gmail's received time as an estimated date.
 - A sender domain is only a hint, not proof an email is genuine. Review every imported transaction.
 
-Categories are suggested locally from merchant text, using built-in rules. Examples include Transport, Groceries, Food & drink, Shopping, Subscriptions, Transfer, and Other. New or ambiguous merchants default to Other; review and change a suggestion in Edit before confirming. The app does not use an AI service or automatically learn new merchant rules.
+Categories are suggested locally from merchant text, using built-in rules. Examples include Transport, Groceries, Food & drink, Shopping, Subscriptions, Transfer, and Other. New or ambiguous merchants default to Other; review and change a suggestion in Edit before confirming. To teach Pocketlog a category, edit a transaction and check **Remember category for this merchant** before saving. The saved choice takes priority over standard suggestions for future expense imports from that exact merchant (case and extra spaces are ignored). Transfers and income keep their types. Manage or forget choices under **Settings → Merchant categories**. Existing transactions keep their categories when a rule changes. Rules are stored on the device and do not use an AI service.
 
 ## Using the app
 
@@ -189,7 +190,7 @@ Never commit keystores, passwords, or service-account files. `.gitignore` alread
 
 | Option | What it contains | Restorable |
 | --- | --- | --- |
-| **JSON backup** | Transactions and Gmail scan history (ledger and cursors) | Yes |
+| **JSON backup** | Transactions, Gmail scan history (ledger and cursors), and remembered merchant categories | Yes |
 | **CSV export** | Transactions only (id, merchant, amount, date, category, source, status, bank, type, Gmail fields) | No, for spreadsheets only |
 | **Cloud backup** | Same as JSON backup, encrypted | Yes |
 
@@ -199,7 +200,7 @@ Never commit keystores, passwords, or service-account files. `.gitignore` alread
 - Dismissed emails stay dismissed and are not brought back.
 - Missing scan history and cursors are added.
 
-The JSON file declares the format `pocketlog-backup` and a version. Files from a different format or a newer version are rejected rather than partly imported, and files over 25 MB are refused.
+New JSON backups use `pocketlog-backup` version 2 and include remembered merchant categories; version 1 backups remain restorable. Existing device rules win conflicts, and forgotten merchants stay forgotten when restoring an older backup. The cloud encryption envelope format is unchanged. The JSON file declares the format `pocketlog-backup` and a version. Files from a different format or a newer version are rejected rather than partly imported, and files over 25 MB are refused.
 
 **Cloud backup flow**
 
@@ -230,18 +231,19 @@ app/src/main/java/com/expensemail/app/
   ExpenseMailApp.kt         Navigation and top-level app coordination
   ExpenseViewModel.kt       Screen-facing state and app operations
   ExpenseRepository.kt      Local data persistence and backup serialization
-  Theme.kt                  Color tokens and shared constants
+  AppTheme.kt               Color tokens and shared constants
   Expense.kt                Transaction model
-  Formatting.kt             Currency, date, and label helpers
-  ExpenseStorage.kt         SharedPreferences load and save for transactions
+  ExpenseUiUtils.kt         Currency, date, category, and label helpers
+  ExpenseJsonCodec.kt       Compatible transaction JSON serialization
+  MerchantCategoryRules.kt  Exact merchant rules and validation
+  MerchantRulesScreen.kt    Remembered merchant category management
   HomeScreen.kt             Dashboard
-  CoverageScreen.kt         Review queue and skipped-email coverage
+  ReviewScreen.kt           Pending review, edit, and manual import
+  SkippedScreens.kt         Skipped-email list and manual recovery
+  SpendingFeatureScreens.kt Coverage, category, recurring, insight, and target views
   ActivityScreen.kt         Confirmed transactions and date filters
-  SpendingScreen.kt         Category and spending insights
-  PlanScreen.kt             Optional spending targets
   SettingsScreen.kt         Gmail and backup settings
-  Components.kt             Shared UI pieces
-  Dialogs.kt                Edit and restore dialogs
+  SharedComponents.kt       Shared UI pieces
   BankAlertParser.kt        Bank email parsing
   GmailInboxReader.kt       Gmail API client
   GmailSyncEngine.kt        Bounded, resumable scan logic
@@ -285,7 +287,7 @@ gradle :app:testDebugUnitTest :app:lint   # unit tests and lint (Gradle 8.9)
 gradle :app:assembleDebug                 # debug APK
 ```
 
-Unit tests cover the parser, sync engine, ledger, JSON codecs, backup merge, CSV export, cloud envelope encryption, and timeline logic.
+Unit tests cover the parser, sync engine, ledger, merchant category matching and deletions, JSON codecs, backup compatibility and merge, CSV export, cloud envelope encryption, and timeline logic.
 
 **Backup API**
 

@@ -169,11 +169,14 @@ internal fun SkippedEmailDialog(
     onRetry: () -> Unit,
     onAddMode: () -> Unit,
     onSave: (Expense) -> Unit,
+    suggestCategory: (Expense) -> Expense,
 ) {
     var merchant by remember(entry.messageId) { mutableStateOf("") }
     var amount by remember(entry.messageId) { mutableStateOf("") }
     var bank by remember(entry.messageId) { mutableStateOf(bankNameForSender(entry.sender)) }
     var category by remember(entry.messageId) { mutableStateOf("Other") }
+    var categoryEdited by remember(entry.messageId) { mutableStateOf(false) }
+    var categoryRuleMerchant by remember(entry.messageId) { mutableStateOf<String?>(null) }
     var recordType by remember(entry.messageId) { mutableStateOf("Expense") }
     var transactionDate by remember(entry.messageId) {
         mutableStateOf(entry.receivedAtMillis?.let { java.time.Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault()).toLocalDate() } ?: LocalDate.now())
@@ -189,7 +192,9 @@ internal fun SkippedEmailDialog(
                 merchant = parsed.merchant
                 amount = parsed.amount.toString()
                 bank = parsed.bank
-                category = parsed.category
+                val suggested = suggestCategory(parsed)
+                category = suggested.category
+                categoryRuleMerchant = suggested.categoryRuleMerchant
                 recordType = parsed.recordType
                 expenseLocalDate(parsed)?.let { transactionDate = it }
             }
@@ -218,7 +223,14 @@ internal fun SkippedEmailDialog(
                         Text(if (showEmail) "Hide email details" else "Show email details", color = Mint)
                     }
                     if (showEmail) Text(email.body.ifBlank { "This email has no readable text content." }.take(12_000), color = White, fontSize = 12.sp, lineHeight = 17.sp)
-                    OutlinedTextField(merchant, { merchant = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Merchant or description") }, singleLine = true)
+                    OutlinedTextField(merchant, {
+                        merchant = it
+                        if (!categoryEdited && recordType == "Expense") {
+                            val suggested = suggestCategory(Expense(merchant = it, amount = 0, date = "", category = "Other"))
+                            category = suggested.category
+                            categoryRuleMerchant = suggested.categoryRuleMerchant
+                        } else categoryRuleMerchant = null
+                    }, modifier = Modifier.fillMaxWidth(), label = { Text("Merchant or description") }, singleLine = true)
                     OutlinedTextField(amount, { amount = it.filter(Char::isDigit) }, modifier = Modifier.fillMaxWidth(), label = { Text("Amount (IDR)") }, singleLine = true)
                     DateChoice("Transaction date", transactionDate, { transactionDate = it }, Modifier.fillMaxWidth())
                     OutlinedTextField(bank, { bank = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Bank") }, singleLine = true)
@@ -226,7 +238,19 @@ internal fun SkippedEmailDialog(
                     Box {
                         OutlinedButton(onClick = { typeMenu = true }, modifier = Modifier.fillMaxWidth()) { Text(recordType, modifier = Modifier.weight(1f)); Text("Change") }
                         DropdownMenu(expanded = typeMenu, onDismissRequest = { typeMenu = false }) {
-                            listOf("Expense", "Transfer", "Income").forEach { value -> DropdownMenuItem(text = { Text(value) }, onClick = { recordType = value; typeMenu = false }) }
+                            listOf("Expense", "Transfer", "Income").forEach { value -> DropdownMenuItem(text = { Text(value) }, onClick = {
+                                recordType = value
+                                typeMenu = false
+                                categoryRuleMerchant = null
+                                if (value == "Expense") {
+                                    category = category.takeIf { it in EXPENSE_CATEGORIES } ?: "Other"
+                                    if (!categoryEdited) {
+                                        val suggested = suggestCategory(Expense(merchant = merchant, amount = 0, date = "", category = category))
+                                        category = suggested.category
+                                        categoryRuleMerchant = suggested.categoryRuleMerchant
+                                    }
+                                }
+                            }) }
                         }
                     }
                     if (recordType == "Expense") {
@@ -235,7 +259,7 @@ internal fun SkippedEmailDialog(
                             OutlinedButton(onClick = { categoryMenu = true }, modifier = Modifier.fillMaxWidth()) { Text(category, modifier = Modifier.weight(1f)); Text("Change") }
                             DropdownMenu(expanded = categoryMenu, onDismissRequest = { categoryMenu = false }) {
                                 EXPENSE_CATEGORIES.forEach { value ->
-                                    DropdownMenuItem(text = { Text(value) }, onClick = { category = value; categoryMenu = false })
+                                    DropdownMenuItem(text = { Text(value) }, onClick = { category = value; categoryEdited = true; categoryRuleMerchant = null; categoryMenu = false })
                                 }
                             }
                         }
@@ -255,6 +279,7 @@ internal fun SkippedEmailDialog(
                             amount = amount.toLong(),
                             date = transactionDate.format(DateTimeFormatter.ofPattern("d MMM uuuu", Locale.ENGLISH)),
                             category = if (recordType == "Expense") category else recordType,
+                            categoryRuleMerchant = categoryRuleMerchant.takeIf { recordType == "Expense" },
                             source = "Gmail · manually added",
                             bank = bank.trim().ifBlank { "Unknown bank" },
                             recordType = recordType,

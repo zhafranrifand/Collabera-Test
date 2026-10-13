@@ -16,7 +16,8 @@ data class Expense(
     val gmailAccountEmail: String? = null,
     val emailSender: String? = null,
     val emailSubject: String? = null,
-    val emailReceivedAtMillis: Long? = null
+    val emailReceivedAtMillis: Long? = null,
+    val categoryRuleMerchant: String? = null,
 )
 
 internal fun Expense.isLegacyDemoRecord(): Boolean = when {
